@@ -53,7 +53,7 @@ class LocalMaterialMatch:
 class _LocalMaterialEntry:
     """Internal representation of a single CSV row."""
 
-    names: List[str]
+    names: List[tuple[str, str]]  # (display, normalized)
     category: str
     group: str
     unit: str
@@ -68,16 +68,16 @@ class _LocalMaterialEntry:
             return 0.0
 
         best = 0.0
-        for name in self.names:
-            if not name:
+        for _, normalized in self.names:
+            if not normalized:
                 continue
-            if query == name:
+            if query == normalized:
                 return 1.0
-            if name.startswith(query):
+            if normalized.startswith(query):
                 best = max(best, 0.9)
-            if query in name:
+            if query in normalized:
                 best = max(best, 0.82)
-            ratio = SequenceMatcher(None, query, name).ratio()
+            ratio = SequenceMatcher(None, query, normalized).ratio()
             if ratio > 0.6:
                 best = max(best, ratio * 0.85)
 
@@ -92,7 +92,7 @@ class _LocalMaterialEntry:
 
     def to_match(self, score: float) -> LocalMaterialMatch:
         """Convert to an outward-facing match."""
-        primary_name = next((name for name in self.names if name), "")
+        primary_name = next((display for display, _ in self.names if display), "")
         display_name = primary_name or self.category or "Материал"
         notes = self.notes
         if self.category and self.category.lower() not in notes.lower():
@@ -156,14 +156,26 @@ class LocalMaterialDatabase:
             logger.error("Failed to load local materials CSV %s: %s", self._path, exc)
 
     def _build_entry(self, row: dict) -> Optional[_LocalMaterialEntry]:
-        names = [
-            _norm(row.get("Nome")),
-            _norm(row.get("Nome ")),  # trailing space header support
-            _norm(row.get("Название RU")),
-            _norm(row.get("Название RU [AI]")),
+        raw_name_values = [
+            row.get("Nome"),
+            row.get("Nome "),  # trailing space header support
+            row.get("Название RU"),
+            row.get("Название RU [AI]"),
         ]
 
-        if not any(names):
+        names: List[tuple[str, str]] = []
+        seen_normalized: set[str] = set()
+        for raw_value in raw_name_values:
+            if raw_value is None:
+                continue
+            display_value = raw_value.strip()
+            normalized_value = _norm(raw_value)
+            if not normalized_value or normalized_value in seen_normalized:
+                continue
+            seen_normalized.add(normalized_value)
+            names.append((display_value or raw_value, normalized_value))
+
+        if not names:
             return None
 
         category = row.get("Категория", "").strip()
@@ -199,10 +211,8 @@ class LocalMaterialDatabase:
         ]
         notes = " | ".join(part.strip() for part in notes_parts if part and part.strip())
 
-        unique_names = [name for name in dict.fromkeys(names) if name]
-
         return _LocalMaterialEntry(
-            names=unique_names,
+            names=names,
             category=category,
             group=group,
             unit=unit,
@@ -234,7 +244,7 @@ class LocalMaterialDatabase:
 
         if exact_only:
             for entry in self._entries:
-                if normalized_query in entry.names:
+                if any(normalized_query == normalized for _, normalized in entry.names):
                     matches.append(entry.to_match(1.0))
             return matches[:limit]
 
