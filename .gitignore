@@ -1,0 +1,42 @@
+# Environment variables
+.env
+
+# Markdown tables (optional - uncomment if you don't want to track them)
+# *.md
+# !README.md
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+build/
+dist/
+*.egg-info/
+
+# Runtime artifacts
+cache/
+logs/
+*.db
+*.sqlite
+
+# Keep placeholder files
+!cache/.gitkeep
+!logs/.gitkeep
+!credentials/.gitkeep
+
+# Credentials
+credentials/*.json
+
+# Tooling
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

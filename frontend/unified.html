@@ -1,0 +1,1273 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Construction AI Agent - Все возможности в одном месте</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        [v-cloak] { display: none; }
+        .tab-active {
+            @apply border-b-2 border-blue-500 text-blue-600;
+        }
+        .result-box {
+            @apply bg-gray-50 border border-gray-200 rounded-lg p-4 mt-4;
+        }
+        .loading {
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body class="bg-gray-100">
+    <div id="app" v-cloak>
+        <!-- Header -->
+        <header class="bg-gradient-to-r from-blue-600 to-purple-600 text-white shadow-lg">
+            <div class="container mx-auto px-4 py-6">
+                <h1 class="text-3xl font-bold flex items-center">
+                    <i class="fas fa-robot mr-3"></i>
+                    Construction AI Agent
+                </h1>
+                <p class="text-blue-100 mt-2">
+                    🚀 Поиск материалов • 📊 Google Sheets • 🏗️ Проверка смет • 🌐 Веб-поиск
+                </p>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="container mx-auto px-4 py-8">
+            <!-- Tabs -->
+            <div class="bg-white rounded-lg shadow-md mb-6">
+                <div class="flex border-b overflow-x-auto">
+                    <button 
+                        v-for="tab in tabs" 
+                        :key="tab.id"
+                        @click="activeTab = tab.id"
+                        :class="{'tab-active': activeTab === tab.id}"
+                        class="px-6 py-4 font-medium text-gray-600 hover:text-blue-600 whitespace-nowrap transition-colors"
+                    >
+                        <i :class="tab.icon" class="mr-2"></i>
+                        {{ tab.name }}
+                    </button>
+                </div>
+
+                <!-- Tab Content -->
+                <div class="p-6">
+                    <!-- Universal Command Tab -->
+                    <div v-if="activeTab === 'universal'" class="space-y-4">
+                        <h2 class="text-2xl font-bold text-gray-800 mb-4">
+                            💬 Универсальный интерфейс
+                        </h2>
+                        <p class="text-gray-600 mb-4">
+                            Просто напишите, что вам нужно, и агент сам определит, как это сделать!
+                        </p>
+                        
+                        <div class="grid lg:grid-cols-3 gap-6">
+                            <div class="space-y-4 lg:col-span-2">
+                                <div class="space-y-4">
+                                    <textarea
+                                        v-model="universalCommand"
+                                        class="w-full border border-gray-300 rounded-lg p-4 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                                        rows="4"
+                                        placeholder="Например:&#10;- Найди цену на цемент в Португалии&#10;- Прочитай таблицу и покажи первые 10 строк&#10;- Проверь смету на соответствие&#10;- Найди в интернете поставщиков керамической плитки"
+                                    ></textarea>
+                                    
+                                    <div class="flex items-center gap-3">
+                                        <button
+                                            @click="processUniversalCommand"
+                                            :disabled="loading || !universalCommand.trim()"
+                                            class="flex-1 bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
+                                        >
+                                            <i class="fas fa-paper-plane mr-2"></i>
+                                            Выполнить команду
+                                        </button>
+                                        <button
+                                            v-if="historyActiveId"
+                                            @click="historyActiveId = null"
+                                            class="px-4 py-3 text-sm text-gray-600 hover:text-gray-900 transition-colors"
+                                        >
+                                            Сбросить выбор
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <div v-if="universalResult" class="result-box">
+                                    <h3 class="font-bold text-lg mb-2">Результат:</h3>
+                                    <div class="whitespace-pre-wrap" v-html="formatResult(universalResult)"></div>
+                                </div>
+
+                                <div
+                                    v-if="sheetEmbedUrl && stats && stats.sheet"
+                                    class="result-box"
+                                >
+                                    <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-3">
+                                        <div>
+                                            <h3 class="font-bold text-lg text-gray-800">
+                                                {{ stats.sheet.spreadsheet_title }}
+                                            </h3>
+                                            <p class="text-sm text-gray-600">
+                                                Лист: {{ stats.sheet.worksheet }}
+                                            </p>
+                                        </div>
+                                        <a
+                                            :href="stats.sheet.worksheet_url"
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            class="inline-flex items-center bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors"
+                                        >
+                                            <i class="fas fa-external-link-alt mr-2"></i>
+                                            Открыть в Google Sheets
+                                        </a>
+                                    </div>
+                                    <div class="overflow-hidden rounded-lg border border-gray-200">
+                                        <iframe
+                                            :src="sheetEmbedUrl"
+                                            class="w-full"
+                                            style="height: 480px;"
+                                            frameborder="0"
+                                            allowfullscreen
+                                        ></iframe>
+                                    </div>
+                                    <p class="mt-2 text-xs text-gray-500">
+                                        Встраиваемый просмотр поддерживается Google Sheets. Для полного редактирования откройте таблицу в новой вкладке.
+                                    </p>
+                                </div>
+                            </div>
+
+                            <div class="space-y-4">
+                                <div class="bg-white border border-gray-200 rounded-lg p-4">
+                                    <div class="flex items-center justify-between mb-4">
+                                        <h3 class="font-bold text-lg text-gray-800">
+                                            История запросов
+                                        </h3>
+                                        <button
+                                            @click="clearHistory"
+                                            :disabled="!universalHistory.length"
+                                            class="text-sm text-gray-500 hover:text-red-600 disabled:text-gray-300 transition-colors"
+                                        >
+                                            Очистить
+                                        </button>
+                                    </div>
+
+                                    <p v-if="!universalHistory.length" class="text-sm text-gray-500">
+                                        История появится после выполнения команд.
+                                    </p>
+
+                                    <div
+                                        v-for="item in universalHistory"
+                                        :key="item.id"
+                                        class="mb-3 last:mb-0"
+                                    >
+                                        <button
+                                            @click="loadHistoryEntry(item)"
+                                            class="w-full text-left border border-transparent hover:border-blue-200 rounded-lg p-3 transition-colors"
+                                            :class="{
+                                                'bg-blue-50 border-blue-200 shadow-sm': historyActiveId === item.id,
+                                                'bg-gray-50': historyActiveId !== item.id
+                                            }"
+                                        >
+                                            <div class="flex items-center justify-between gap-2">
+                                                <span
+                                                    class="text-xs font-medium"
+                                                    :class="item.success ? 'text-green-600' : 'text-red-600'"
+                                                >
+                                                    {{ item.success ? 'Успех' : 'Ошибка' }}
+                                                </span>
+                                                <span class="text-xs text-gray-500">
+                                                    {{ formatTimestamp(item.timestamp) }}
+                                                </span>
+                                            </div>
+                                            <p class="mt-2 text-sm text-gray-800 break-words whitespace-pre-line max-h-20 overflow-hidden">
+                                                {{ item.command }}
+                                            </p>
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Project Chat Tab -->
+                    <div v-if="activeTab === 'projectChat'" class="space-y-4">
+                        <h2 class="text-2xl font-bold text-gray-800 mb-4">
+                            🧠 Аура проекта
+                        </h2>
+                        <p class="text-gray-600 mb-4">
+                            Задайте вопрос об архитектуре, файлах или возможностях репозитория. Ассистент использует README и документацию, чтобы помочь разобраться.
+                        </p>
+
+                        <div class="grid lg:grid-cols-3 gap-6">
+                            <div class="lg:col-span-2 space-y-4">
+                                <div class="bg-white border border-gray-200 rounded-lg shadow-sm h-96 flex flex-col">
+                                    <div
+                                        ref="projectChatScroll"
+                                        class="flex-1 overflow-y-auto px-4 py-4 space-y-3"
+                                    >
+                                        <div
+                                            v-if="!projectChatMessages.length"
+                                            class="h-full flex flex-col items-center justify-center text-center text-gray-500"
+                                        >
+                                            <i class="fas fa-comments text-3xl mb-3 text-gray-400"></i>
+                                            <p>Чат пуст. Задайте первый вопрос, например: «Расскажи, как устроен ConstructionAIAgent».</p>
+                                        </div>
+                                        <div
+                                            v-for="message in projectChatMessages"
+                                            :key="message.id"
+                                            class="flex"
+                                            :class="{
+                                                'justify-end': message.role === 'user',
+                                                'justify-start': message.role !== 'user'
+                                            }"
+                                        >
+                                            <div
+                                                class="max-w-full sm:max-w-xl rounded-lg px-4 py-3 shadow-sm border"
+                                                :class="{
+                                                    'bg-blue-600 text-white border-blue-600': message.role === 'user',
+                                                    'bg-gray-50 text-gray-900 border-gray-200': message.role === 'assistant',
+                                                    'bg-yellow-50 text-gray-900 border-yellow-200': message.role === 'system'
+                                                }"
+                                            >
+                                                <div class="text-xs font-semibold opacity-80 mb-1 flex items-center justify-between gap-3">
+                                                    <span>{{ labelProjectChatRole(message.role) }}</span>
+                                                    <span>{{ formatTimestamp(message.timestamp) }}</span>
+                                                </div>
+                                                <p class="whitespace-pre-line break-words">{{ message.content }}</p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="space-y-3">
+                                    <textarea
+                                        v-model="projectChatInput"
+                                        @keydown="handleProjectChatKeydown"
+                                        class="w-full border border-gray-300 rounded-lg p-4 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                                        rows="3"
+                                        placeholder="Расскажи об основных модулях проекта..."
+                                    ></textarea>
+                                    <input
+                                        v-model="projectChatExtraContext"
+                                        type="text"
+                                        class="w-full border border-gray-300 rounded-lg p-3 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                                        placeholder="Дополнительный контекст (опционально, например, название файла)"
+                                    >
+                                    <div class="flex flex-wrap items-center gap-3">
+                                        <button
+                                            @click="sendProjectChatMessage"
+                                            :disabled="projectChatLoading || !projectChatInput.trim()"
+                                            class="flex-1 bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
+                                        >
+                                            <i class="fas fa-paper-plane mr-2"></i>
+                                            Отправить
+                                        </button>
+                                        <button
+                                            @click="resetProjectChat"
+                                            :disabled="projectChatLoading"
+                                            class="px-5 py-3 rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-100 transition-colors"
+                                        >
+                                            <i class="fas fa-undo mr-2"></i>
+                                            Сбросить диалог
+                                        </button>
+                                        <div
+                                            v-if="projectChatLoading"
+                                            class="flex items-center text-gray-500 text-sm"
+                                        >
+                                            <i class="fas fa-spinner loading mr-2"></i>
+                                            Получаем ответ...
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="space-y-4">
+                                <div class="bg-white border border-gray-200 rounded-lg p-4 shadow-sm">
+                                    <h3 class="font-semibold text-gray-800 mb-2">Подсказки</h3>
+                                    <ul class="space-y-2 text-sm text-gray-600 list-disc list-inside">
+                                        <li>«Опиши ключевые компоненты backend-части»</li>
+                                        <li>«Какие файлы отвечают за работу с Google Sheets?»</li>
+                                        <li>«Расскажи про кеширование результатов»</li>
+                                        <li>«Что делает файл unified_app.py?»</li>
+                                    </ul>
+                                </div>
+                                <div class="bg-blue-50 border border-blue-100 rounded-lg p-4 text-sm text-blue-800">
+                                    Контекст чата пополняется фрагментами README и документации. Можно указать дополнительный файл в поле выше, чтобы сфокусироваться на нём.
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Materials Search Tab -->
+                    <div v-if="activeTab === 'materials'" class="space-y-4">
+                        <h2 class="text-2xl font-bold text-gray-800 mb-4">
+                            🔍 Поиск цен на материалы
+                        </h2>
+                        
+                        <div class="grid md:grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-2">
+                                    Название материала
+                                </label>
+                                <input
+                                    v-model="materialSearch.name"
+                                    type="text"
+                                    class="w-full border border-gray-300 rounded-lg p-3 focus:ring-2 focus:ring-blue-500"
+                                    placeholder="Cement Portland, Ceramic tiles..."
+                                >
+                            </div>
+                            
+                            <div class="space-y-2">
+                                <label class="block text-sm font-medium text-gray-700">
+                                    Опции поиска
+                                </label>
+                                <div class="flex items-center space-x-4">
+                                    <label class="flex items-center">
+                                        <input v-model="materialSearch.useCache" type="checkbox" class="mr-2">
+                                        Использовать кэш
+                                    </label>
+                                    <label class="flex items-center">
+                                        <input v-model="materialSearch.useScraping" type="checkbox" class="mr-2">
+                                        Парсинг сайтов
+                                    </label>
+                                    <label class="flex items-center">
+                                        <input v-model="materialSearch.useAdvanced" type="checkbox" class="mr-2">
+                                        Продвинутый поиск
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+
+                        <button
+                            @click="searchMaterial"
+                            :disabled="loading || !materialSearch.name.trim()"
+                            class="bg-green-600 text-white px-6 py-3 rounded-lg hover:bg-green-700 disabled:bg-gray-400 transition-colors"
+                        >
+                            <i class="fas fa-search mr-2"></i>
+                            Найти цену
+                        </button>
+
+                        <div v-if="materialResult" class="result-box">
+                            <div class="grid md:grid-cols-2 gap-4">
+                                <div>
+                                    <h3 class="font-bold text-lg mb-2">{{ materialResult.name }}</h3>
+                                    <p class="text-gray-600">🇵🇹 {{ materialResult.pt_name }}</p>
+                                </div>
+                                <div class="text-right">
+                                    <div class="text-2xl font-bold text-green-600">{{ materialResult.price }}</div>
+                                    <div class="text-gray-600">{{ materialResult.best_supplier }}</div>
+                                </div>
+                            </div>
+                            
+                            <div class="mt-4 p-3 bg-blue-50 rounded">
+                                <p class="text-sm text-gray-700">{{ materialResult.reasoning }}</p>
+                            </div>
+                            
+                            <a :href="materialResult.url" target="_blank" class="inline-block mt-3 text-blue-600 hover:underline">
+                                <i class="fas fa-external-link-alt mr-1"></i>
+                                Открыть страницу поставщика
+                            </a>
+
+                            <div v-if="materialResult.quotes && materialResult.quotes.length > 0" class="mt-4">
+                                <h4 class="font-bold mb-2">Все найденные предложения ({{ materialResult.quotes.length }}):</h4>
+                                <div class="space-y-2">
+                                    <div v-for="quote in materialResult.quotes" :key="quote.url" class="border-l-4 border-gray-300 pl-3">
+                                        <div class="font-medium">{{ quote.supplier }}</div>
+                                        <div class="text-sm text-gray-600">{{ quote.price }} • {{ quote.notes }}</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Batch Search Tab -->
+                    <div v-if="activeTab === 'batch'" class="space-y-4">
+                        <h2 class="text-2xl font-bold text-gray-800 mb-4">
+                            📋 Пакетный поиск материалов
+                        </h2>
+                        
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-2">
+                                Список материалов (по одному на строку)
+                            </label>
+                            <textarea
+                                v-model="batchMaterials"
+                                class="w-full border border-gray-300 rounded-lg p-3 focus:ring-2 focus:ring-blue-500"
+                                rows="8"
+                                placeholder="Cement Portland&#10;Ceramic tiles&#10;Sand 0-4mm&#10;Gravel&#10;Wood plywood 18mm"
+                            ></textarea>
+                        </div>
+
+                        <button
+                            @click="searchBatch"
+                            :disabled="loading || !batchMaterials.trim()"
+                            class="bg-purple-600 text-white px-6 py-3 rounded-lg hover:bg-purple-700 disabled:bg-gray-400 transition-colors"
+                        >
+                            <i class="fas fa-list mr-2"></i>
+                            Найти все цены
+                        </button>
+
+                        <div v-if="batchResults" class="result-box">
+                            <h3 class="font-bold text-lg mb-4">Результаты поиска:</h3>
+                            <div class="overflow-x-auto">
+                                <table class="min-w-full divide-y divide-gray-200">
+                                    <thead class="bg-gray-50">
+                                        <tr>
+                                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Материал</th>
+                                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Поставщик</th>
+                                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Цена</th>
+                                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Ссылка</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody class="bg-white divide-y divide-gray-200">
+                                        <tr v-for="material in batchResults" :key="material.name">
+                                            <td class="px-4 py-3 text-sm">{{ material.name }}</td>
+                                            <td class="px-4 py-3 text-sm">{{ material.best_supplier }}</td>
+                                            <td class="px-4 py-3 text-sm font-medium text-green-600">{{ material.price }}</td>
+                                            <td class="px-4 py-3 text-sm">
+                                                <a :href="material.url" target="_blank" class="text-blue-600 hover:underline">
+                                                    <i class="fas fa-external-link-alt"></i>
+                                                </a>
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Google Sheets Tab -->
+                    <div v-if="activeTab === 'sheets'" class="space-y-4">
+                        <h2 class="text-2xl font-bold text-gray-800 mb-4">
+                            📊 Работа с Google Sheets
+                        </h2>
+
+                        <div
+                            v-if="stats && stats.sheet"
+                            class="bg-blue-50 border border-blue-200 rounded-lg p-4 space-y-3"
+                        >
+                            <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                                <div>
+                                    <p class="font-semibold text-blue-900">
+                                        {{ stats.sheet.spreadsheet_title }}
+                                    </p>
+                                    <p class="text-sm text-blue-800">
+                                        Лист: {{ stats.sheet.worksheet }}
+                                    </p>
+                                    <p class="text-sm text-blue-800">
+                                        Размер: {{ stats.sheet.rows }} × {{ stats.sheet.columns }}
+                                    </p>
+                                    <p
+                                        v-if="stats.sheet.available_worksheets && stats.sheet.available_worksheets.length"
+                                        class="text-xs text-blue-700 mt-1"
+                                    >
+                                        Доступные листы: {{ stats.sheet.available_worksheets.join(', ') }}
+                                    </p>
+                                </div>
+                                <div class="flex flex-col sm:flex-row gap-2 w-full md:w-auto">
+                                    <a
+                                        v-if="stats.sheet.worksheet_url"
+                                        :href="stats.sheet.worksheet_url"
+                                        target="_blank"
+                                        class="inline-flex items-center justify-center bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors"
+                                    >
+                                        <i class="fas fa-external-link-alt mr-2"></i>
+                                        Открыть в Google Sheets
+                                    </a>
+                                    <button
+                                        @click="loadSheetPreview"
+                                        class="inline-flex items-center justify-center bg-white border border-blue-400 text-blue-700 px-4 py-2 rounded-lg hover:bg-blue-100 transition-colors"
+                                    >
+                                        <i class="fas fa-eye mr-2"></i>
+                                        Предпросмотр
+                                    </button>
+                                </div>
+                            </div>
+                            <p class="text-xs text-blue-600">
+                                Предпросмотр показывает первые {{ sheetPreviewLimit }} строк (включая заголовок).
+                            </p>
+                        </div>
+                        
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-2">
+                                Команда для таблицы
+                            </label>
+                            <textarea
+                                v-model="sheetsCommand"
+                                class="w-full border border-gray-300 rounded-lg p-3 focus:ring-2 focus:ring-blue-500"
+                                rows="4"
+                                placeholder="Примеры:&#10;- Прочитай таблицу&#10;- Создай таблицу с колонками: Имя, Возраст, Город&#10;- Добавь строку: Иван, 25, Москва&#10;- Очисти таблицу"
+                            ></textarea>
+                        </div>
+
+                        <button
+                            @click="processSheetsCommand"
+                            :disabled="loading || !sheetsCommand.trim()"
+                            class="bg-indigo-600 text-white px-6 py-3 rounded-lg hover:bg-indigo-700 disabled:bg-gray-400 transition-colors"
+                        >
+                            <i class="fas fa-table mr-2"></i>
+                            Выполнить
+                        </button>
+
+                        <div v-if="sheetsResult" class="result-box">
+                            <div class="whitespace-pre-wrap" v-html="formatResult(sheetsResult)"></div>
+                        </div>
+
+                        <div v-if="sheetPreview" class="result-box">
+                            <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between mb-3 gap-2">
+                                <h3 class="font-bold text-lg">Предпросмотр листа</h3>
+                                <div class="text-sm text-gray-500">
+                                    Показаны {{ sheetPreview.visibleRows }} из {{ sheetPreview.totalDataRows }} строк
+                                    ({{ sheetPreview.totalRows }} × {{ sheetPreview.totalColumns }} с учётом заголовка)
+                                </div>
+                            </div>
+                            <div class="overflow-x-auto">
+                                <table class="min-w-full border border-gray-200 text-sm">
+                                    <thead v-if="sheetPreview.headers.length" class="bg-gray-100">
+                                        <tr>
+                                            <th
+                                                v-for="(header, index) in sheetPreview.headers"
+                                                :key="'header-' + index"
+                                                class="px-3 py-2 text-left font-medium text-gray-700 border-b border-gray-200"
+                                            >
+                                                {{ header || ' ' }}
+                                            </th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <tr
+                                            v-for="(row, rowIndex) in sheetPreview.rows"
+                                            :key="'row-' + rowIndex"
+                                            class="bg-white border-b border-gray-200"
+                                        >
+                                            <td
+                                                v-for="(cell, cellIndex) in row"
+                                                :key="'cell-' + rowIndex + '-' + cellIndex"
+                                                class="px-3 py-2 text-gray-700"
+                                            >
+                                                {{ cell }}
+                                            </td>
+                                        </tr>
+                                        <tr v-if="!sheetPreview.rows.length">
+                                            <td
+                                                :colspan="sheetPreview.columnCount || 1"
+                                                class="px-3 py-6 text-center text-gray-500"
+                                            >
+                                                Нет данных для отображения
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                            <p
+                                v-if="sheetPreview.hasMore"
+                                class="mt-2 text-xs text-gray-500"
+                            >
+                                Есть ещё {{ sheetPreview.totalDataRows - sheetPreview.visibleRows }} строк. Откройте лист в Google Sheets для полного просмотра.
+                            </p>
+                        </div>
+                    </div>
+
+                    <!-- Estimate Check Tab -->
+                    <div v-if="activeTab === 'estimate'" class="space-y-4">
+                        <h2 class="text-2xl font-bold text-gray-800 mb-4">
+                            🏗️ Проверка строительной сметы
+                        </h2>
+                        
+                        <div class="grid md:grid-cols-3 gap-4">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-2">
+                                    Лист со сметой
+                                </label>
+                                <input
+                                    v-model="estimateCheck.estimateSheet"
+                                    type="text"
+                                    class="w-full border border-gray-300 rounded-lg p-3"
+                                    placeholder="Sheet1"
+                                >
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-2">
+                                    Мастер-лист
+                                </label>
+                                <input
+                                    v-model="estimateCheck.masterSheet"
+                                    type="text"
+                                    class="w-full border border-gray-300 rounded-lg p-3"
+                                    placeholder="Master List"
+                                >
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-2">
+                                    Колонка с количеством
+                                </label>
+                                <input
+                                    v-model="estimateCheck.quantityCol"
+                                    type="text"
+                                    class="w-full border border-gray-300 rounded-lg p-3"
+                                    placeholder="F"
+                                >
+                            </div>
+                        </div>
+
+                        <button
+                            @click="checkEstimate"
+                            :disabled="loading"
+                            class="bg-orange-600 text-white px-6 py-3 rounded-lg hover:bg-orange-700 disabled:bg-gray-400 transition-colors"
+                        >
+                            <i class="fas fa-check-circle mr-2"></i>
+                            Проверить смету
+                        </button>
+
+                        <div v-if="estimateResult" class="result-box">
+                            <div class="whitespace-pre-wrap" v-html="formatResult(estimateResult)"></div>
+                        </div>
+                    </div>
+
+                    <!-- Stats Tab -->
+                    <div v-if="activeTab === 'stats'" class="space-y-4">
+                        <h2 class="text-2xl font-bold text-gray-800 mb-4">
+                            📊 Статистика и настройки
+                        </h2>
+                        
+                        <button
+                            @click="loadStats"
+                            class="bg-gray-600 text-white px-6 py-3 rounded-lg hover:bg-gray-700 transition-colors"
+                        >
+                            <i class="fas fa-sync-alt mr-2"></i>
+                            Обновить статистику
+                        </button>
+
+                        <div v-if="stats" class="grid md:grid-cols-2 gap-6">
+                            <div class="bg-white border border-gray-200 rounded-lg p-6">
+                                <h3 class="font-bold text-lg mb-4">Кэш</h3>
+                                <div class="space-y-2">
+                                    <div class="flex justify-between">
+                                        <span>Всего записей:</span>
+                                        <span class="font-bold">{{ stats.cache.total_materials }}</span>
+                                    </div>
+                                    <div class="flex justify-between">
+                                        <span>Актуальных:</span>
+                                        <span class="font-bold text-green-600">{{ stats.cache.fresh_materials }}</span>
+                                    </div>
+                                    <div class="flex justify-between">
+                                        <span>Устаревших:</span>
+                                        <span class="font-bold text-red-600">{{ stats.cache.expired_materials }}</span>
+                                    </div>
+                                </div>
+                                <button
+                                    @click="clearCache"
+                                    class="mt-4 w-full bg-red-600 text-white px-4 py-2 rounded hover:bg-red-700 transition-colors"
+                                >
+                                    <i class="fas fa-trash mr-2"></i>
+                                    Очистить кэш
+                                </button>
+                            </div>
+
+                            <div class="bg-white border border-gray-200 rounded-lg p-6">
+                                <h3 class="font-bold text-lg mb-4">Конфигурация</h3>
+                                <div class="space-y-2 text-sm">
+                                    <div class="flex justify-between">
+                                        <span>Модель:</span>
+                                        <span class="font-mono">{{ stats.config.model }}</span>
+                                    </div>
+                                    <div class="flex justify-between">
+                                        <span>Кэш:</span>
+                                        <span :class="stats.config.cache_enabled ? 'text-green-600' : 'text-red-600'">
+                                            {{ stats.config.cache_enabled ? 'Включен' : 'Выключен' }}
+                                        </span>
+                                    </div>
+                                    <div class="flex justify-between">
+                                        <span>Google Sheets:</span>
+                                        <span :class="stats.config.sheets_enabled ? 'text-green-600' : 'text-red-600'">
+                                            {{ stats.config.sheets_enabled ? 'Включен' : 'Выключен' }}
+                                        </span>
+                                    </div>
+                                    <div class="flex justify-between">
+                                        <span>Продвинутый поиск:</span>
+                                        <span :class="stats.config.advanced_search_enabled ? 'text-green-600' : 'text-red-600'">
+                                            {{ stats.config.advanced_search_enabled ? 'Включен' : 'Выключен' }}
+                                        </span>
+                                    </div>
+                                    <div class="flex justify-between">
+                                        <span>Локальная LLM:</span>
+                                        <span :class="stats.config.local_llm_enabled ? 'text-green-600' : 'text-gray-500'">
+                                            {{ stats.config.local_llm_enabled ? 'Активна' : 'Выключена' }}
+                                        </span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div
+                                v-if="stats.materials_db"
+                                class="bg-white border border-gray-200 rounded-lg p-6 md:col-span-2"
+                            >
+                                <h3 class="font-bold text-lg mb-4">База материалов</h3>
+                                <div class="space-y-2 text-sm">
+                                    <div class="flex justify-between">
+                                        <span>Помощник:</span>
+                                        <span :class="stats.materials_db.assistant_enabled ? 'text-green-600' : 'text-red-600'">
+                                            {{ stats.materials_db.assistant_enabled ? 'Доступен' : 'Недоступен' }}
+                                        </span>
+                                    </div>
+                                    <div class="flex justify-between">
+                                        <span>Google Sheet:</span>
+                                        <span :class="stats.materials_db.sheet_enabled ? 'text-green-600' : 'text-gray-500'">
+                                            {{ stats.materials_db.sheet_enabled ? 'Подключен' : 'Не задан' }}
+                                        </span>
+                                    </div>
+                                    <div
+                                        v-if="stats.materials_db.worksheets && stats.materials_db.worksheets.length"
+                                        class="text-xs text-gray-500"
+                                    >
+                                        Листы: {{ stats.materials_db.worksheets.join(', ') }}
+                                    </div>
+                                    <div class="flex justify-between">
+                                        <span>Синхронизация CSV:</span>
+                                        <span :class="stats.materials_db.sync_csv ? 'text-green-600' : 'text-gray-500'">
+                                            {{ stats.materials_db.sync_csv ? 'Включена' : 'Выключена' }}
+                                        </span>
+                                    </div>
+                                    <div class="flex justify-between">
+                                        <span>Ожидающие изменения:</span>
+                                        <span class="font-bold">
+                                            {{ stats.materials_db.pending_changes }}
+                                        </span>
+                                    </div>
+                                    <div
+                                        v-if="stats.materials_db.sheet_id"
+                                        class="text-xs text-gray-500 break-words"
+                                    >
+                                        Sheet ID: {{ stats.materials_db.sheet_id }}
+                                    </div>
+                                    <div
+                                        v-if="stats.materials_db.worksheet"
+                                        class="text-xs text-gray-500 break-words"
+                                    >
+                                        Лист: {{ stats.materials_db.worksheet }}
+                                    </div>
+                                    <div
+                                        v-if="stats.materials_db.csv_path"
+                                        class="text-xs text-gray-500 break-words"
+                                    >
+                                        CSV: {{ stats.materials_db.csv_path }}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Loading Overlay -->
+            <div v-if="loading" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+                <div class="bg-white rounded-lg p-8 text-center">
+                    <i class="fas fa-spinner fa-spin text-4xl text-blue-600 mb-4"></i>
+                    <p class="text-lg font-medium">Обработка запроса...</p>
+                </div>
+            </div>
+        </main>
+
+        <!-- Footer -->
+        <footer class="bg-gray-800 text-white py-6 mt-12">
+            <div class="container mx-auto px-4 text-center">
+                <p>&copy; 2024 Construction AI Agent. Все возможности в одном месте.</p>
+            </div>
+        </footer>
+    </div>
+
+    <script>
+        const { createApp } = Vue;
+
+        createApp({
+            data() {
+                return {
+                    activeTab: 'projectChat',
+                    loading: false,
+                    tabs: [
+                        { id: 'projectChat', name: 'Аура проекта', icon: 'fas fa-comments' },
+                        { id: 'universal', name: 'Универсальный', icon: 'fas fa-magic' },
+                        { id: 'materials', name: 'Поиск материалов', icon: 'fas fa-search' },
+                        { id: 'batch', name: 'Пакетный поиск', icon: 'fas fa-list' },
+                        { id: 'sheets', name: 'Google Sheets', icon: 'fas fa-table' },
+                        { id: 'estimate', name: 'Проверка смет', icon: 'fas fa-check-circle' },
+                        { id: 'stats', name: 'Статистика', icon: 'fas fa-chart-bar' },
+                    ],
+                    universalCommand: '',
+                    universalResult: null,
+                    universalHistory: [],
+                    historyActiveId: null,
+                    historyLimit: 20,
+                    historyStorageKey: 'construction-ai-agent-history',
+                    projectChatMessages: [],
+                    projectChatInput: '',
+                    projectChatExtraContext: '',
+                    projectChatLoading: false,
+                    projectChatHistoryKey: 'construction-ai-project-chat',
+                    materialSearch: {
+                        name: '',
+                        useCache: true,
+                        useScraping: false,
+                        useAdvanced: false,
+                    },
+                    materialResult: null,
+                    batchMaterials: '',
+                    batchResults: null,
+                    sheetsCommand: '',
+                    sheetsResult: null,
+                    sheetPreview: null,
+                    sheetPreviewLimit: 20,
+                    estimateCheck: {
+                        estimateSheet: '',
+                        masterSheet: 'Master List',
+                        quantityCol: 'F',
+                    },
+                    estimateResult: null,
+                    stats: null,
+                };
+            },
+            computed: {
+                sheetEmbedUrl() {
+                    if (!this.stats || !this.stats.sheet) {
+                        return null;
+                    }
+                    const sheet = this.stats.sheet;
+                    const spreadsheetId = sheet.spreadsheet_id;
+                    if (!spreadsheetId) {
+                        return null;
+                    }
+                    const rawId = sheet.worksheet_id ?? sheet.worksheetId;
+                    let gidValue = 0;
+                    if (rawId !== undefined && rawId !== null) {
+                        const numeric = Number(rawId);
+                        gidValue = Number.isFinite(numeric) ? numeric : rawId;
+                    }
+                    const gid = encodeURIComponent(gidValue);
+                    return `https://docs.google.com/spreadsheets/d/${spreadsheetId}/htmlembed?gid=${gid}`;
+                },
+            },
+            methods: {
+                async processUniversalCommand() {
+                    this.loading = true;
+                    this.universalResult = null;
+                    const commandText = this.universalCommand.trim();
+                    try {
+                        const response = await fetch('/api/command', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ command: this.universalCommand }),
+                        });
+                        const data = await response.json();
+                        if (data.success) {
+                            this.universalResult = data.result;
+                            this.addHistoryEntry(commandText, data.result, true);
+                        } else {
+                            const message = `Ошибка: ${data.error}`;
+                            this.universalResult = message;
+                            this.addHistoryEntry(commandText, message, false);
+                        }
+                    } catch (error) {
+                        const message = `Ошибка: ${error.message}`;
+                        this.universalResult = message;
+                        this.addHistoryEntry(commandText, message, false);
+                    } finally {
+                        this.loading = false;
+                    }
+                },
+                labelProjectChatRole(role) {
+                    if (role === 'user') return 'Вы';
+                    if (role === 'assistant') return 'Агент';
+                    if (role === 'system') return 'Система';
+                    return 'Сообщение';
+                },
+                handleProjectChatKeydown(event) {
+                    if (event.key !== 'Enter' || event.shiftKey) {
+                        return;
+                    }
+                    const text = this.projectChatInput.trim();
+                    if (!text || this.projectChatLoading) {
+                        event.preventDefault();
+                        return;
+                    }
+                    event.preventDefault();
+                    this.sendProjectChatMessage();
+                },
+                async sendProjectChatMessage() {
+                    const text = this.projectChatInput.trim();
+                    if (!text || this.projectChatLoading) {
+                        return;
+                    }
+                    const userMessage = {
+                        id: `${Date.now()}-user`,
+                        role: 'user',
+                        content: text,
+                        timestamp: new Date().toISOString(),
+                    };
+                    this.projectChatMessages.push(userMessage);
+                    this.projectChatInput = '';
+                    this.projectChatLoading = true;
+                    try {
+                        const payload = { message: text };
+                        const extra = this.projectChatExtraContext.trim();
+                        if (extra) {
+                            payload.extra_context = extra;
+                        }
+                        const response = await fetch('/api/project-chat', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(payload),
+                        });
+                        const data = await response.json();
+                        if (data.success) {
+                            this.projectChatMessages.push({
+                                id: `${Date.now()}-assistant`,
+                                role: 'assistant',
+                                content: data.reply,
+                                timestamp: data.timestamp || new Date().toISOString(),
+                            });
+                        } else {
+                            this.projectChatMessages.push({
+                                id: `${Date.now()}-error`,
+                                role: 'system',
+                                content: `Ошибка: ${data.error}`,
+                                timestamp: new Date().toISOString(),
+                            });
+                        }
+                    } catch (error) {
+                        this.projectChatMessages.push({
+                            id: `${Date.now()}-exception`,
+                            role: 'system',
+                            content: `Ошибка: ${error.message}`,
+                            timestamp: new Date().toISOString(),
+                        });
+                    } finally {
+                        this.projectChatLoading = false;
+                        this.saveProjectChatHistory();
+                        this.$nextTick(() => this.scrollProjectChatToBottom());
+                    }
+                },
+                async resetProjectChat() {
+                    if (this.projectChatLoading) {
+                        return;
+                    }
+                    this.projectChatLoading = true;
+                    this.projectChatMessages = [];
+                    try {
+                        const response = await fetch('/api/project-chat', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ reset: true }),
+                        });
+                        const data = await response.json();
+                        if (data.success && data.reply) {
+                            this.projectChatMessages.push({
+                                id: `${Date.now()}-reset`,
+                                role: 'system',
+                                content: data.reply,
+                                timestamp: data.timestamp || new Date().toISOString(),
+                            });
+                        } else if (!data.success) {
+                            this.projectChatMessages.push({
+                                id: `${Date.now()}-reset-error`,
+                                role: 'system',
+                                content: `Ошибка: ${data.error}`,
+                                timestamp: new Date().toISOString(),
+                            });
+                        }
+                    } catch (error) {
+                        this.projectChatMessages.push({
+                            id: `${Date.now()}-reset-exception`,
+                            role: 'system',
+                            content: `Ошибка: ${error.message}`,
+                            timestamp: new Date().toISOString(),
+                        });
+                    } finally {
+                        this.projectChatLoading = false;
+                        this.projectChatInput = '';
+                        this.saveProjectChatHistory();
+                        this.$nextTick(() => this.scrollProjectChatToBottom());
+                    }
+                },
+                saveProjectChatHistory() {
+                    try {
+                        localStorage.setItem(
+                            this.projectChatHistoryKey,
+                            JSON.stringify(this.projectChatMessages),
+                        );
+                    } catch (error) {
+                        console.warn('Не удалось сохранить историю проектного чата', error);
+                    }
+                },
+                loadProjectChatHistory() {
+                    try {
+                        const raw = localStorage.getItem(this.projectChatHistoryKey);
+                        if (!raw) {
+                            return;
+                        }
+                        const parsed = JSON.parse(raw);
+                        if (Array.isArray(parsed)) {
+                            this.projectChatMessages = parsed;
+                        }
+                    } catch (error) {
+                        console.warn('Не удалось загрузить историю проектного чата', error);
+                    }
+                },
+                scrollProjectChatToBottom() {
+                    const container = this.$refs.projectChatScroll;
+                    if (container) {
+                        container.scrollTop = container.scrollHeight;
+                    }
+                },
+                addHistoryEntry(command, result, success) {
+                    if (!command) {
+                        return;
+                    }
+                    const entry = {
+                        id: Date.now(),
+                        command,
+                        result,
+                        success,
+                        timestamp: new Date().toISOString(),
+                    };
+                    this.universalHistory.unshift(entry);
+                    if (this.universalHistory.length > this.historyLimit) {
+                        this.universalHistory.splice(this.historyLimit);
+                    }
+                    this.historyActiveId = entry.id;
+                    this.saveHistory();
+                },
+                async searchMaterial() {
+                    this.loading = true;
+                    this.materialResult = null;
+                    try {
+                        const response = await fetch('/api/materials/search', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                material_name: this.materialSearch.name,
+                                use_cache: this.materialSearch.useCache,
+                                use_scraping: this.materialSearch.useScraping,
+                                use_advanced_search: this.materialSearch.useAdvanced,
+                            }),
+                        });
+                        const data = await response.json();
+                        if (data.success) {
+                            this.materialResult = data.material;
+                        } else {
+                            alert(`Ошибка: ${data.error}`);
+                        }
+                    } catch (error) {
+                        alert(`Ошибка: ${error.message}`);
+                    } finally {
+                        this.loading = false;
+                    }
+                },
+                loadHistoryEntry(item) {
+                    this.universalCommand = item.command;
+                    this.universalResult = item.result;
+                    this.historyActiveId = item.id;
+                },
+                clearHistory() {
+                    this.universalHistory = [];
+                    this.historyActiveId = null;
+                    try {
+                        localStorage.removeItem(this.historyStorageKey);
+                    } catch (error) {
+                        console.warn('Не удалось очистить историю', error);
+                    }
+                },
+                saveHistory() {
+                    try {
+                        localStorage.setItem(
+                            this.historyStorageKey,
+                            JSON.stringify(this.universalHistory),
+                        );
+                    } catch (error) {
+                        console.warn('Не удалось сохранить историю запросов', error);
+                    }
+                },
+                loadHistoryFromStorage() {
+                    try {
+                        const raw = localStorage.getItem(this.historyStorageKey);
+                        if (!raw) {
+                            return;
+                        }
+                        const parsed = JSON.parse(raw);
+                        if (Array.isArray(parsed)) {
+                            this.universalHistory = parsed;
+                        }
+                    } catch (error) {
+                        console.warn('Не удалось загрузить историю запросов', error);
+                    }
+                },
+                async searchBatch() {
+                    this.loading = true;
+                    this.batchResults = null;
+                    try {
+                        const materials = this.batchMaterials.split('\n').filter(m => m.trim());
+                        const response = await fetch('/api/materials/batch', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ materials }),
+                        });
+                        const data = await response.json();
+                        if (data.success) {
+                            this.batchResults = data.materials;
+                        } else {
+                            alert(`Ошибка: ${data.error}`);
+                        }
+                    } catch (error) {
+                        alert(`Ошибка: ${error.message}`);
+                    } finally {
+                        this.loading = false;
+                    }
+                },
+                async processSheetsCommand() {
+                    this.loading = true;
+                    this.sheetsResult = null;
+                    try {
+                        const response = await fetch('/api/sheets/command', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ command: this.sheetsCommand }),
+                        });
+                        const data = await response.json();
+                        if (data.success) {
+                            this.sheetsResult = data.result;
+                        } else {
+                            this.sheetsResult = `Ошибка: ${data.error}`;
+                        }
+                    } catch (error) {
+                        this.sheetsResult = `Ошибка: ${error.message}`;
+                    } finally {
+                        this.loading = false;
+                    }
+                },
+                async loadSheetPreview() {
+                    this.loading = true;
+                    try {
+                        const response = await fetch('/api/sheets/read');
+                        const data = await response.json();
+                        if (data.success) {
+                            const rawData = data.data || [];
+                            const previewLimit = this.sheetPreviewLimit;
+                            const trimmed = rawData.slice(0, previewLimit);
+
+                            let headers = [];
+                            let rows = [];
+
+                            if (trimmed.length > 0) {
+                                headers = trimmed[0];
+                                rows = trimmed.slice(1);
+                            } else if (rawData.length > 0) {
+                                headers = rawData[0];
+                                rows = rawData.slice(1, previewLimit);
+                            }
+
+                            const columnCount = headers.length || (rows[0] ? rows[0].length : 0);
+                            const visibleRows = rows.length;
+                            const totalDataRows = Math.max(data.rows - 1, 0);
+
+                            this.sheetPreview = {
+                                headers,
+                                rows,
+                                columnCount,
+                                visibleRows,
+                                totalDataRows,
+                                totalRows: data.rows,
+                                totalColumns: data.columns,
+                                hasMore: totalDataRows > visibleRows,
+                            };
+                        } else {
+                            this.sheetsResult = `Ошибка: ${data.error}`;
+                            this.sheetPreview = null;
+                        }
+                    } catch (error) {
+                        this.sheetsResult = `Ошибка: ${error.message}`;
+                        this.sheetPreview = null;
+                    } finally {
+                        this.loading = false;
+                    }
+                },
+                async checkEstimate() {
+                    this.loading = true;
+                    this.estimateResult = null;
+                    try {
+                        const response = await fetch('/api/estimate/check', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(this.estimateCheck),
+                        });
+                        const data = await response.json();
+                        if (data.success) {
+                            this.estimateResult = data.report;
+                        } else {
+                            this.estimateResult = `Ошибка: ${data.error}`;
+                        }
+                    } catch (error) {
+                        this.estimateResult = `Ошибка: ${error.message}`;
+                    } finally {
+                        this.loading = false;
+                    }
+                },
+                async loadStats() {
+                    this.loading = true;
+                    try {
+                        const response = await fetch('/api/stats');
+                        const data = await response.json();
+                        this.stats = data;
+                        this.sheetPreview = null;
+                    } catch (error) {
+                        alert(`Ошибка: ${error.message}`);
+                    } finally {
+                        this.loading = false;
+                    }
+                },
+                async clearCache() {
+                    if (!confirm('Вы уверены, что хотите очистить весь кэш?')) return;
+                    this.loading = true;
+                    try {
+                        const response = await fetch('/api/cache/clear', { method: 'POST' });
+                        const data = await response.json();
+                        if (data.success) {
+                            alert('Кэш очищен');
+                            this.loadStats();
+                        }
+                    } catch (error) {
+                        alert(`Ошибка: ${error.message}`);
+                    } finally {
+                        this.loading = false;
+                    }
+                },
+                formatTimestamp(timestamp) {
+                    try {
+                        const date = new Date(timestamp);
+                        return date.toLocaleTimeString('ru-RU', {
+                            hour: '2-digit',
+                            minute: '2-digit',
+                        });
+                    } catch (error) {
+                        return '';
+                    }
+                },
+                formatResult(text) {
+                    if (!text) return '';
+                    // Convert markdown-style formatting to HTML
+                    return text
+                        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+                        .replace(/\n/g, '<br>');
+                },
+            },
+            mounted() {
+                this.loadHistoryFromStorage();
+                this.loadProjectChatHistory();
+                this.$nextTick(() => this.scrollProjectChatToBottom());
+                this.loadStats();
+            },
+        }).mount('#app');
+    </script>
+</body>
+</html>
