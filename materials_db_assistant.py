@@ -341,7 +341,26 @@ class MaterialsDatabaseAssistant:
                 model=self.llm_model,
                 messages=messages,
                 temperature=0.0,
-                response_format={"type": "json_object"},
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "materials_db_intent",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "intent": {"type": "string"},
+                                "record_id": {"type": ["string", "null"]},
+                                "query": {"type": ["string", "null"]},
+                                "fields": {"type": "object", "additionalProperties": True},
+                                "reason": {"type": ["string", "null"]},
+                                "confirmation_id": {"type": ["string", "null"]},
+                                "worksheet": {"type": ["string", "null"]},
+                            },
+                            "required": ["intent"],
+                            "additionalProperties": True,
+                        },
+                    },
+                },
             )
         except Exception as exc:  # noqa: BLE001
             logger.error("LLM classification failed: %s", exc)

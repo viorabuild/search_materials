@@ -5,6 +5,7 @@ Implements SQLite-based caching to avoid redundant API calls and web searches.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import sqlite3
@@ -142,9 +143,15 @@ class CacheManager:
             conn.commit()
             logger.info("Cached material '%s'", material_name)
     
+    @staticmethod
+    def _hash_query(query: str) -> str:
+        """Return a deterministic hash for caching search queries."""
+        normalized = (query or "").strip()
+        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
     def get_search_results(self, query: str) -> Optional[str]:
         """Retrieve cached search results."""
-        query_hash = str(hash(query))
+        query_hash = self._hash_query(query)
         
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
@@ -166,7 +173,7 @@ class CacheManager:
     
     def set_search_results(self, query: str, results: str) -> None:
         """Store search results in cache."""
-        query_hash = str(hash(query))
+        query_hash = self._hash_query(query)
         
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(

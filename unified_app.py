@@ -199,7 +199,8 @@ def project_chat():
                 reset_history=reset,
             )
         except RuntimeError as exc:
-            return jsonify({'error': str(exc)}), 503
+            status_code = getattr(exc, 'status_code', 503)
+            return jsonify({'error': str(exc)}), status_code
         except ValueError as exc:
             return jsonify({'error': str(exc)}), 400
         
@@ -275,7 +276,7 @@ def search_materials_batch():
         return jsonify({'error': str(e)}), 500
 
 
-@app.route('/api/sheets/command', methods=['POST'])
+@app.route('/api/sheets/command', methods=['GET', 'POST'])
 def sheets_command():
     """
     Выполнить команду для Google Sheets.
@@ -289,18 +290,35 @@ def sheets_command():
         return jsonify({'error': 'Agent not initialized'}), 500
     
     try:
-        data = request.get_json()
-        command = data.get('command', '').strip()
-        
-        if not command:
+        if request.method == 'GET':
+            history = agent.get_sheets_chat_history()
+            return jsonify({
+                'success': True,
+                'history': history,
+                'timestamp': datetime.now().isoformat(),
+            })
+
+        data = request.get_json() or {}
+        raw_command = data.get('command', '')
+        command = raw_command.strip() if isinstance(raw_command, str) else ''
+        reset = bool(data.get('reset', False))
+
+        if not command and not reset:
             return jsonify({'error': 'command is required'}), 400
-        
-        logger.info("Processing sheets command: %s", command)
-        result = agent.process_sheets_command(command)
+
+        logger.info("Processing sheets command: %s (reset=%s)", command, reset)
+
+        if reset and not command:
+            reply = agent.reset_sheets_chat()
+        else:
+            reply = agent.chat_about_sheets(command, reset_history=reset)
+
+        history = agent.get_sheets_chat_history()
         
         return jsonify({
             'success': True,
-            'result': result,
+            'reply': reply,
+            'history': history,
             'timestamp': datetime.now().isoformat(),
         })
     

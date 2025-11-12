@@ -582,7 +582,7 @@ class MaterialPriceAgent:
         logger.info("Using alternative supplier '%s' for material '%s'", supplier, material_name)
         return [quote], best_offer
 
-    def _resolve_material(
+    def resolve_material(
         self,
         material_name: str,
         analysis: MaterialQueryAnalysis,
@@ -645,6 +645,14 @@ class MaterialPriceAgent:
             quotes=quotes,
             best_offer=best_offer,
         )
+
+    def _resolve_material(
+        self,
+        *args,
+        **kwargs,
+    ) -> MaterialResult:
+        """Backward-compatible wrapper around resolve_material."""
+        return self.resolve_material(*args, **kwargs)
 
     # --------------------------- Google Sheets ---------------------------- #
 
@@ -1035,7 +1043,7 @@ class MaterialPriceAgent:
         for material in materials:
             logger.info("Processing material '%s'", material)
             analysis = self.analyze_material(material)
-            yield self._resolve_material(
+            yield self.resolve_material(
                 material,
                 analysis,
                 use_scraping,
@@ -1062,7 +1070,7 @@ class MaterialPriceAgent:
         for row_offset, material in enumerate(materials, start=2):
             logger.info("Processing material '%s' (row %d)", material, row_offset)
             analysis = self.analyze_material(material)
-            result = self._resolve_material(
+            result = self.resolve_material(
                 material,
                 analysis,
                 use_scraping,

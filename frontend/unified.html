@@ -491,29 +491,101 @@
                             </p>
                         </div>
                         
-                        <div>
-                            <label class="block text-sm font-medium text-gray-700 mb-2">
-                                Команда для таблицы
-                            </label>
-                            <textarea
-                                v-model="sheetsCommand"
-                                class="w-full border border-gray-300 rounded-lg p-3 focus:ring-2 focus:ring-blue-500"
-                                rows="4"
-                                placeholder="Примеры:&#10;- Прочитай таблицу&#10;- Создай таблицу с колонками: Имя, Возраст, Город&#10;- Добавь строку: Иван, 25, Москва&#10;- Очисти таблицу"
-                            ></textarea>
+                        <div class="grid lg:grid-cols-3 gap-6">
+                            <div class="lg:col-span-2 space-y-4">
+                                <div class="bg-white border border-gray-200 rounded-lg shadow-sm h-96 flex flex-col">
+                                    <div
+                                        ref="sheetsChatScroll"
+                                        class="flex-1 overflow-y-auto px-4 py-4 space-y-3"
+                                    >
+                                        <div
+                                            v-if="!sheetsChatMessages.length"
+                                            class="h-full flex flex-col items-center justify-center text-center text-gray-500"
+                                        >
+                                            <i class="fas fa-robot text-3xl mb-3 text-gray-400"></i>
+                                            <p>Начните диалог, например: «Прочитай таблицу» или «Добавь столбец с итогами».</p>
+                                        </div>
+                                        <div
+                                            v-for="message in sheetsChatMessages"
+                                            :key="message.id"
+                                            class="flex"
+                                            :class="{
+                                                'justify-end': message.role === 'user',
+                                                'justify-start': message.role !== 'user'
+                                            }"
+                                        >
+                                            <div
+                                                class="max-w-full sm:max-w-xl rounded-lg px-4 py-3 shadow-sm border"
+                                                :class="{
+                                                    'bg-indigo-600 text-white border-indigo-600': message.role === 'user',
+                                                    'bg-gray-50 text-gray-900 border-gray-200': message.role === 'assistant',
+                                                    'bg-yellow-50 text-gray-900 border-yellow-200': message.role === 'system'
+                                                }"
+                                            >
+                                                <div class="text-xs font-semibold opacity-80 mb-1 flex items-center justify-between gap-3">
+                                                    <span>{{ labelSheetsChatRole(message.role) }}</span>
+                                                    <span>{{ formatTimestamp(message.timestamp) }}</span>
+                                                </div>
+                                                <p class="whitespace-pre-line break-words">{{ message.content }}</p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="space-y-3">
+                                    <textarea
+                                        v-model="sheetsChatInput"
+                                        @keydown="handleSheetsChatKeydown"
+                                        class="w-full border border-gray-300 rounded-lg p-4 focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                                        rows="3"
+                                        placeholder="Например: «Обнови столбец B: статус — завершено», «Сделай сводку по категориям»"
+                                    ></textarea>
+                                    <div class="flex flex-wrap items-center gap-3">
+                                        <button
+                                            @click="sendSheetsChatMessage"
+                                            :disabled="sheetsChatLoading || !sheetsChatInput.trim()"
+                                            class="flex-1 bg-indigo-600 text-white px-6 py-3 rounded-lg hover:bg-indigo-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
+                                        >
+                                            <i class="fas fa-paper-plane mr-2"></i>
+                                            Отправить
+                                        </button>
+                                        <button
+                                            @click="resetSheetsChat"
+                                            :disabled="sheetsChatLoading"
+                                            class="px-5 py-3 rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-100 transition-colors"
+                                        >
+                                            <i class="fas fa-undo mr-2"></i>
+                                            Сбросить диалог
+                                        </button>
+                                        <div
+                                            v-if="sheetsChatLoading"
+                                            class="flex items-center text-gray-500 text-sm"
+                                        >
+                                            <i class="fas fa-spinner loading mr-2"></i>
+                                            Обрабатываем команду...
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="space-y-4">
+                                <div class="bg-white border border-gray-200 rounded-lg p-4 shadow-sm">
+                                    <h3 class="font-semibold text-gray-800 mb-2">Подсказки</h3>
+                                    <ul class="space-y-2 text-sm text-gray-600 list-disc list-inside">
+                                        <li v-for="prompt in sheetsChatSuggestions" :key="prompt">{{ prompt }}</li>
+                                    </ul>
+                                </div>
+                                <div class="bg-indigo-50 border border-indigo-100 rounded-lg p-4 text-sm text-indigo-800">
+                                    Контекст переписки сохраняется до перезапуска сервера. Используйте «Сбросить диалог», чтобы начать заново.
+                                </div>
+                            </div>
                         </div>
 
-                        <button
-                            @click="processSheetsCommand"
-                            :disabled="loading || !sheetsCommand.trim()"
-                            class="bg-indigo-600 text-white px-6 py-3 rounded-lg hover:bg-indigo-700 disabled:bg-gray-400 transition-colors"
+                        <div
+                            v-if="sheetsAlert"
+                            class="result-box bg-yellow-50 border border-yellow-200 text-yellow-900"
                         >
-                            <i class="fas fa-table mr-2"></i>
-                            Выполнить
-                        </button>
-
-                        <div v-if="sheetsResult" class="result-box">
-                            <div class="whitespace-pre-wrap" v-html="formatResult(sheetsResult)"></div>
+                            {{ sheetsAlert }}
                         </div>
 
                         <div v-if="sheetPreview" class="result-box">
@@ -816,8 +888,18 @@
                     materialResult: null,
                     batchMaterials: '',
                     batchResults: null,
-                    sheetsCommand: '',
-                    sheetsResult: null,
+                    sheetsChatMessages: [],
+                    sheetsChatInput: '',
+                    sheetsChatLoading: false,
+                    sheetsChatHistoryKey: 'construction-ai-sheets-chat',
+                    sheetsChatInitialized: false,
+                    sheetsChatSuggestions: [
+                        'Прочитай таблицу и подведи итоги по затратам',
+                        'Сгруппируй данные по категориям и покажи суммы',
+                        'Добавь столбец «Статус выполнения» и отметь строки как "В работе"',
+                        'Найди строки, где цена выше 1000, и покажи их',
+                    ],
+                    sheetsAlert: null,
                     sheetPreview: null,
                     sheetPreviewLimit: 20,
                     estimateCheck: {
@@ -847,6 +929,14 @@
                     }
                     const gid = encodeURIComponent(gidValue);
                     return `https://docs.google.com/spreadsheets/d/${spreadsheetId}/htmlembed?gid=${gid}`;
+                },
+            },
+            watch: {
+                activeTab(newTab) {
+                    if (newTab === 'sheets') {
+                        this.ensureSheetsChatInitialized();
+                        this.loadStats();
+                    }
                 },
             },
             methods: {
@@ -883,6 +973,12 @@
                     if (role === 'system') return 'Система';
                     return 'Сообщение';
                 },
+                labelSheetsChatRole(role) {
+                    if (role === 'user') return 'Вы';
+                    if (role === 'assistant') return 'Sheets AI';
+                    if (role === 'system') return 'Система';
+                    return 'Сообщение';
+                },
                 handleProjectChatKeydown(event) {
                     if (event.key !== 'Enter' || event.shiftKey) {
                         return;
@@ -894,6 +990,18 @@
                     }
                     event.preventDefault();
                     this.sendProjectChatMessage();
+                },
+                handleSheetsChatKeydown(event) {
+                    if (event.key !== 'Enter' || event.shiftKey) {
+                        return;
+                    }
+                    const text = this.sheetsChatInput.trim();
+                    if (!text || this.sheetsChatLoading) {
+                        event.preventDefault();
+                        return;
+                    }
+                    event.preventDefault();
+                    this.sendSheetsChatMessage();
                 },
                 async sendProjectChatMessage() {
                     const text = this.projectChatInput.trim();
@@ -1021,6 +1129,164 @@
                         container.scrollTop = container.scrollHeight;
                     }
                 },
+                enrichSheetsHistory(history) {
+                    const base = Date.now();
+                    return (history || []).map((entry, index) => ({
+                        id: `sheets-${base + index}`,
+                        role: entry.role || 'assistant',
+                        content: entry.content || '',
+                        timestamp: entry.timestamp || new Date(base + index).toISOString(),
+                    }));
+                },
+                async loadSheetsChatHistory() {
+                    try {
+                        const response = await fetch('/api/sheets/command');
+                        const data = await response.json();
+                        if (data.success && Array.isArray(data.history)) {
+                            this.sheetsChatMessages = this.enrichSheetsHistory(data.history);
+                            this.sheetsChatInitialized = true;
+                            this.saveSheetsChatHistory();
+                            this.$nextTick(() => this.scrollSheetsChatToBottom());
+                            return;
+                        } else if (!data.success) {
+                            this.sheetsAlert = `Ошибка: ${data.error}`;
+                        }
+                    } catch (error) {
+                        console.warn('Не удалось загрузить историю Google Sheets из API', error);
+                        this.sheetsAlert = `Ошибка: ${error.message}`;
+                    }
+                    this.loadSheetsChatHistoryFromStorage();
+                },
+                loadSheetsChatHistoryFromStorage() {
+                    try {
+                        const raw = localStorage.getItem(this.sheetsChatHistoryKey);
+                        if (!raw) {
+                            return;
+                        }
+                        const parsed = JSON.parse(raw);
+                        if (Array.isArray(parsed)) {
+                            this.sheetsChatMessages = parsed;
+                            this.sheetsChatInitialized = true;
+                        }
+                    } catch (error) {
+                        console.warn('Не удалось загрузить историю Google Sheets', error);
+                    }
+                },
+                saveSheetsChatHistory() {
+                    try {
+                        localStorage.setItem(
+                            this.sheetsChatHistoryKey,
+                            JSON.stringify(this.sheetsChatMessages),
+                        );
+                    } catch (error) {
+                        console.warn('Не удалось сохранить историю Google Sheets', error);
+                    }
+                },
+                ensureSheetsChatInitialized() {
+                    if (!this.sheetsChatInitialized) {
+                        this.loadSheetsChatHistory();
+                    } else {
+                        this.$nextTick(() => this.scrollSheetsChatToBottom());
+                    }
+                },
+                async sendSheetsChatMessage() {
+                    const text = this.sheetsChatInput.trim();
+                    if (!text || this.sheetsChatLoading) {
+                        return;
+                    }
+                    this.sheetsAlert = null;
+                    const userMessage = {
+                        id: `${Date.now()}-sheets-user`,
+                        role: 'user',
+                        content: text,
+                        timestamp: new Date().toISOString(),
+                    };
+                    this.sheetsChatMessages.push(userMessage);
+                    this.sheetsChatInput = '';
+                    this.sheetsChatLoading = true;
+                    this.saveSheetsChatHistory();
+                    this.$nextTick(() => this.scrollSheetsChatToBottom());
+
+                    try {
+                        const response = await fetch('/api/sheets/command', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ command: text }),
+                        });
+                        const data = await response.json();
+                        if (data.success && Array.isArray(data.history)) {
+                            this.sheetsChatMessages = this.enrichSheetsHistory(data.history);
+                            this.sheetsChatInitialized = true;
+                            this.saveSheetsChatHistory();
+                        } else {
+                            const message = data.error ? `Ошибка: ${data.error}` : 'Не удалось получить ответ от Sheets AI';
+                            this.sheetsChatMessages.push({
+                                id: `${Date.now()}-sheets-error`,
+                                role: 'system',
+                                content: message,
+                                timestamp: new Date().toISOString(),
+                            });
+                            this.saveSheetsChatHistory();
+                        }
+                    } catch (error) {
+                        this.sheetsChatMessages.push({
+                            id: `${Date.now()}-sheets-exception`,
+                            role: 'system',
+                            content: `Ошибка: ${error.message}`,
+                            timestamp: new Date().toISOString(),
+                        });
+                        this.saveSheetsChatHistory();
+                    } finally {
+                        this.sheetsChatLoading = false;
+                        this.$nextTick(() => this.scrollSheetsChatToBottom());
+                    }
+                },
+                async resetSheetsChat() {
+                    if (this.sheetsChatLoading) {
+                        return;
+                    }
+                    this.sheetsChatLoading = true;
+                    this.sheetsAlert = null;
+                    try {
+                        const response = await fetch('/api/sheets/command', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ reset: true }),
+                        });
+                        const data = await response.json();
+                        if (data.success && Array.isArray(data.history)) {
+                            this.sheetsChatMessages = this.enrichSheetsHistory(data.history);
+                            this.sheetsChatInitialized = true;
+                            this.saveSheetsChatHistory();
+                        } else {
+                            const message = data.error ? `Ошибка: ${data.error}` : 'Не удалось сбросить диалог Google Sheets';
+                            this.sheetsChatMessages.push({
+                                id: `${Date.now()}-sheets-reset-error`,
+                                role: 'system',
+                                content: message,
+                                timestamp: new Date().toISOString(),
+                            });
+                            this.saveSheetsChatHistory();
+                        }
+                    } catch (error) {
+                        this.sheetsChatMessages.push({
+                            id: `${Date.now()}-sheets-reset-exception`,
+                            role: 'system',
+                            content: `Ошибка: ${error.message}`,
+                            timestamp: new Date().toISOString(),
+                        });
+                        this.saveSheetsChatHistory();
+                    } finally {
+                        this.sheetsChatLoading = false;
+                        this.$nextTick(() => this.scrollSheetsChatToBottom());
+                    }
+                },
+                scrollSheetsChatToBottom() {
+                    const container = this.$refs.sheetsChatScroll;
+                    if (container) {
+                        container.scrollTop = container.scrollHeight;
+                    }
+                },
                 addHistoryEntry(command, result, success) {
                     if (!command) {
                         return;
@@ -1125,29 +1391,9 @@
                         this.loading = false;
                     }
                 },
-                async processSheetsCommand() {
-                    this.loading = true;
-                    this.sheetsResult = null;
-                    try {
-                        const response = await fetch('/api/sheets/command', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ command: this.sheetsCommand }),
-                        });
-                        const data = await response.json();
-                        if (data.success) {
-                            this.sheetsResult = data.result;
-                        } else {
-                            this.sheetsResult = `Ошибка: ${data.error}`;
-                        }
-                    } catch (error) {
-                        this.sheetsResult = `Ошибка: ${error.message}`;
-                    } finally {
-                        this.loading = false;
-                    }
-                },
                 async loadSheetPreview() {
                     this.loading = true;
+                    this.sheetsAlert = null;
                     try {
                         const response = await fetch('/api/sheets/read');
                         const data = await response.json();
@@ -1182,11 +1428,11 @@
                                 hasMore: totalDataRows > visibleRows,
                             };
                         } else {
-                            this.sheetsResult = `Ошибка: ${data.error}`;
+                            this.sheetsAlert = `Ошибка: ${data.error}`;
                             this.sheetPreview = null;
                         }
                     } catch (error) {
-                        this.sheetsResult = `Ошибка: ${error.message}`;
+                        this.sheetsAlert = `Ошибка: ${error.message}`;
                         this.sheetPreview = null;
                     } finally {
                         this.loading = false;

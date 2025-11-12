@@ -159,7 +159,11 @@ class GoogleSheetsAI:
         if not self.sheet_id:
             raise ValueError("Не задан идентификатор таблицы. Укажите GOOGLE_SHEET_ID в окружении.")
 
-        self.worksheet_name = worksheet_name or os.getenv('GOOGLE_SHEET_WORKSHEET', 'Sheet1')
+        env_worksheet = os.getenv('GOOGLE_SHEET_WORKSHEET')
+        if env_worksheet is not None:
+            env_worksheet = env_worksheet.strip() or None
+
+        self.worksheet_name = worksheet_name or env_worksheet
 
         self.allowed_domains = self._load_allowed_domains()
         self.fetch_timeout = int(os.getenv('FETCH_TIMEOUT_SECONDS', '10'))
@@ -173,10 +177,36 @@ class GoogleSheetsAI:
 
         self.gspread_client = self._create_gspread_client()
         self.spreadsheet = self.gspread_client.open_by_key(self.sheet_id)
-        self.worksheet = self._get_or_create_worksheet(self.spreadsheet, self.worksheet_name)
+        if self.worksheet_name:
+            self.worksheet = self._get_or_create_worksheet(self.spreadsheet, self.worksheet_name)
+            self.worksheet_name = self.worksheet.title
+        else:
+            # Используем первый лист, если имя не указано
+            self.worksheet = self.spreadsheet.sheet1
+            self.worksheet_name = self.worksheet.title
         
         # Initialize estimate checker if available
         self.estimate_checker = EstimateChecker(self) if ESTIMATE_CHECKER_AVAILABLE else None
+
+        # Conversation history for chat-style interactions
+        self._chat_history: List[Dict[str, str]] = []
+
+    # ------------------------------------------------------------------
+    # Chat helpers
+    # ------------------------------------------------------------------
+
+    def reset_chat(self) -> None:
+        """Сбросить историю диалога с ассистентом Google Sheets."""
+        self._chat_history.clear()
+
+    def get_chat_history(self) -> List[Dict[str, str]]:
+        """Вернуть текущую историю диалога (без модификации)."""
+        return list(self._chat_history)
+
+    def append_system_message(self, content: str) -> None:
+        """Добавить служебное сообщение в историю (без запроса к LLM)."""
+        if content:
+            self._chat_history.append({"role": "system", "content": content})
 
     def _create_gspread_client(self) -> gspread.Client:
         """Создание gspread клиента на основе сервисного аккаунта"""
@@ -610,8 +640,22 @@ class GoogleSheetsAI:
             )
         return info
 
-    def process_command(self, command: str) -> str:
-        """Обработка команды через OpenAI для выполнения действий с таблицей"""
+    def process_command(self, command: str, *, reset: bool = False) -> str:
+        """Обработка команды через OpenAI для выполнения действий с таблицей.
+
+        Args:
+            command: Команда пользователя на естественном языке.
+            reset: Если True, история переписки сбрасывается перед обработкой.
+        """
+
+        if reset:
+            self.reset_chat()
+
+        normalized_command = (command or "").strip()
+        if not normalized_command:
+            if reset:
+                return "🧹 История диалога очищена. Чем помочь?"
+            return "❌ Команда пуста. Опишите, что нужно сделать в Google Sheets."
 
         table_info = self.get_table_info()
         available_sheets = [ws.title for ws in self.spreadsheet.worksheets()]
@@ -696,17 +740,36 @@ WEB_SEARCH возвращает краткий список ссылок и оп
 """
 
         try:
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": command}
+            messages: List[Dict[str, str]] = [
+                {"role": "system", "content": system_prompt}
             ]
+
+            if self._chat_history:
+                messages.extend(self._chat_history)
+
+            messages.append({"role": "user", "content": normalized_command})
+
             fetch_rounds = 0
 
             while True:
                 response = self.openai_client.chat.completions.create(
                     model=self.llm_model,
                     messages=messages,
-                    response_format={"type": "json_object"}
+                    response_format={
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "markdown_ai_action",
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "action": {"type": "string"},
+                                    "explanation": {"type": "string"},
+                                },
+                                "required": ["action"],
+                                "additionalProperties": True,
+                            },
+                        },
+                    },
                 )
 
                 raw_content = response.choices[0].message.content
@@ -715,18 +778,27 @@ WEB_SEARCH возвращает краткий список ссылок и оп
                 try:
                     action_data = json.loads(raw_content)
                 except json.JSONDecodeError:
-                    return f"❌ Модель вернула невалидный JSON: {raw_content}"
+                    final_response = f"❌ Модель вернула невалидный JSON: {raw_content}"
+                    self._chat_history = [msg for msg in messages if msg["role"] != "system"]
+                    self._chat_history.append({"role": "assistant", "content": final_response})
+                    return final_response
 
                 action = action_data.get('action', '').upper()
 
                 if action == 'FETCH_URL':
                     if fetch_rounds >= self.fetch_max_rounds:
-                        return "❌ Превышено количество запросов FETCH_URL за одну команду"
+                        final_response = "❌ Превышено количество запросов FETCH_URL за одну команду"
+                        self._chat_history = [msg for msg in messages if msg["role"] != "system"]
+                        self._chat_history.append({"role": "assistant", "content": final_response})
+                        return final_response
 
                     fetch_rounds += 1
                     url = action_data.get('url', '')
                     if not url:
-                        return "❌ Для FETCH_URL необходимо указать поле 'url'"
+                        final_response = "❌ Для FETCH_URL необходимо указать поле 'url'"
+                        self._chat_history = [msg for msg in messages if msg["role"] != "system"]
+                        self._chat_history.append({"role": "assistant", "content": final_response})
+                        return final_response
 
                     try:
                         content = self.fetch_web_content(url)
@@ -746,17 +818,26 @@ WEB_SEARCH возвращает краткий список ссылок и оп
 
                 result = self._execute_action(action_data)
                 explanation = action_data.get('explanation', 'Выполнено')
+
                 if not result:
-                    return f"✅ {explanation}"
+                    final_response = f"✅ {explanation}"
+                else:
+                    normalized_result = str(result).strip()
+                    if normalized_result.startswith("✅") or normalized_result.startswith("❌"):
+                        final_response = normalized_result
+                    else:
+                        final_response = f"✅ {explanation}\n{normalized_result}"
 
-                normalized_result = str(result).strip()
-                if normalized_result.startswith("✅") or normalized_result.startswith("❌"):
-                    return normalized_result
-
-                return f"✅ {explanation}\n{normalized_result}"
+                self._chat_history = [msg for msg in messages if msg["role"] != "system"]
+                self._chat_history.append({"role": "assistant", "content": final_response})
+                return final_response
 
         except Exception as e:
-            return f"❌ Ошибка: {str(e)}"
+            error_message = f"❌ Ошибка: {str(e)}"
+            # Включаем текущую переписку (если есть) и последнюю реплику
+            self._chat_history = [msg for msg in messages if msg["role"] != "system"] if 'messages' in locals() else []
+            self._chat_history.append({"role": "assistant", "content": error_message})
+            return error_message
 
     def _execute_action(self, action_data: Dict[str, Any]) -> str:
         """Выполнение действия на основе данных от OpenAI"""

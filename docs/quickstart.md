@@ -28,8 +28,9 @@ pip install -r requirements.txt
    - `ENABLE_LOCAL_MATERIAL_DB`, `ENABLE_MATERIALS_DB_ASSISTANT` — загрузка базы и активация помощника материалов
    - `MATERIALS_DB_SHEET_ID`, `MATERIALS_DB_WORKSHEET` — подключение Google Sheets с базой материалов (опционально). `MATERIALS_DB_WORKSHEET` может содержать несколько листов через запятую: `Материалы,Котировки,Работы`
    - `MATERIALS_DB_SYNC_CSV` — синхронизировать ли изменения из Google Sheets в локальный CSV
-   - `ENABLE_LOCAL_LLM`, `LOCAL_LLM_BASE_URL=http://127.0.0.1:1234`, `LOCAL_LLM_MODEL=qwen/qwen3-vl-8b`, `LOCAL_LLM_API_KEY=lm-studio`, `LLM_REQUEST_TIMEOUT_SECONDS` — fallback на локальную LLM (например, LM Studio)
-   - `CACHE_DB_PATH` — путь к SQLite-кэшу (создаётся автоматически)
+   - `ENABLE_LOCAL_LLM`, `LOCAL_LLM_BASE_URL=http://127.0.0.1:1234`, `LOCAL_LLM_MODEL=qwen/qwen3-vl-4b`, `LOCAL_LLM_API_KEY=lm-studio`, `LLM_REQUEST_TIMEOUT_SECONDS` — fallback на локальную LLM (например, LM Studio)
+   - `CACHE_DB_PATH`, `CACHE_TTL_SECONDS` — настройки SQLite-кэша (детерминированные ключи позволяют переиспользовать результаты после перезапуска)
+   - `REQUEST_DELAY_SECONDS`, `MAX_PARALLEL_MATERIAL_SEARCHES` — пауза между запросами и максимальное число потоков для пакетного поиска (помогает оставаться в лимитах API)
 
 > ⚠️ Если вы используете Google Sheets для базы материалов, поделитесь таблицей с сервисным аккаунтом (email из `credentials/service-account.json`) и выдайте права на редактирование.
 

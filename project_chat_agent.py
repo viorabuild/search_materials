@@ -5,11 +5,25 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Sequence
 
 from openai import OpenAI
+
+try:
+    from openai import OpenAIError
+except ImportError:  # pragma: no cover
+    OpenAIError = Exception  # type: ignore
+
+try:
+    from openai import RateLimitError
+except ImportError:  # pragma: no cover
+    RateLimitError = ()  # type: ignore
+
+
+logger = logging.getLogger(__name__)
 
 
 DEFAULT_SYSTEM_PROMPT = (
@@ -38,6 +52,14 @@ class ProjectContext:
     summary: str
 
 
+class ProjectChatError(RuntimeError):
+    """Raised when LLM-backed project chat fails to respond."""
+
+    def __init__(self, message: str, status_code: int = 503) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
 class ProjectChatAgent:
     """LLM-чат для обсуждения проекта."""
 
@@ -49,6 +71,7 @@ class ProjectChatAgent:
         context_files: Optional[Sequence[Path]] = None,
         max_history_turns: int = 6,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
+        request_timeout: Optional[float] = None,
     ) -> None:
         self._client = client
         self._model = model
@@ -57,6 +80,7 @@ class ProjectChatAgent:
         self._system_prompt = system_prompt
         self._history: List[dict] = []
         self._context = self._build_context(context_files)
+        self._request_timeout = request_timeout
 
     def chat(self, message: str, extra_context: Optional[str] = None) -> str:
         """Отправить сообщение в чат и получить ответ."""
@@ -90,11 +114,27 @@ class ProjectChatAgent:
         user_message = message.strip()
         messages.append({"role": "user", "content": user_message})
 
-        response = self._client.chat.completions.create(
-            model=self._model,
-            messages=messages,
-            temperature=0.3,
-        )
+        try:
+            response = self._client.chat.completions.create(
+                model=self._model,
+                messages=messages,
+                temperature=0.3,
+                timeout=self._request_timeout,
+            )
+        except OpenAIError as exc:  # pragma: no cover - network/UI layer
+            status_code = getattr(exc, "status_code", None)
+            if status_code is None:
+                status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            if status_code == 429 or (
+                RateLimitError and isinstance(exc, RateLimitError)
+            ):
+                msg = "Лимит запросов к LLM исчерпан. Попробуйте снова через минуту."
+                raise ProjectChatError(msg, status_code=429) from exc
+            logger.error("Project chat OpenAI error: %s", exc)
+            raise ProjectChatError("LLM сервис временно недоступен.", status_code=503) from exc
+        except Exception as exc:  # pragma: no cover - unexpected runtime
+            logger.exception("Unexpected project chat failure")
+            raise ProjectChatError("Неожиданная ошибка при обращении к проектному чату.") from exc
         answer = (
             response.choices[0].message.content.strip()
             if response.choices

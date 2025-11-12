@@ -18,7 +18,9 @@ import logging
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from threading import Lock
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence
 from dataclasses import dataclass
 
@@ -39,7 +41,7 @@ from cache_manager import CacheManager
 from markdown_ai import GoogleSheetsAI
 from local_materials_db import LocalMaterialDatabase
 from materials_db_assistant import MaterialsDatabaseAssistant
-from project_chat_agent import ProjectChatAgent
+from project_chat_agent import ProjectChatAgent, ProjectChatError
 
 try:
     from estimate_checker import EstimateChecker
@@ -86,6 +88,7 @@ class ConstructionAIAgentConfig:
     request_delay_seconds: float = 1.0
     enable_known_sites: bool = True
     known_sites_only: bool = False
+    max_parallel_material_searches: int = 4
     
     # Web search
     use_bing: bool = False
@@ -130,11 +133,15 @@ class ConstructionAIAgentConfig:
         local_llm_base_url = os.getenv("LOCAL_LLM_BASE_URL")
         if enable_local_llm and not local_llm_base_url:
             local_llm_base_url = "http://127.0.0.1:1234"
-        local_llm_model = os.getenv("LOCAL_LLM_MODEL") or "qwen/qwen3-vl-8b"
+        local_llm_model = os.getenv("LOCAL_LLM_MODEL") or "qwen/qwen3-vl-4b"
         local_llm_api_key = os.getenv("LOCAL_LLM_API_KEY") or "lm-studio"
 
         request_timeout_env = os.getenv("LLM_REQUEST_TIMEOUT_SECONDS")
         llm_request_timeout = float(request_timeout_env) if request_timeout_env else None
+
+        worksheet_env = os.getenv("GOOGLE_SHEET_WORKSHEET")
+        if worksheet_env is not None:
+            worksheet_env = worksheet_env.strip() or None
 
         return cls(
             openai_api_key=os.getenv("OPENAI_API_KEY"),
@@ -147,12 +154,16 @@ class ConstructionAIAgentConfig:
             local_llm_api_key=local_llm_api_key,
             google_service_account_path=os.getenv("GOOGLE_SERVICE_ACCOUNT_PATH") or os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE"),
             google_sheet_id=os.getenv("GOOGLE_SHEET_ID"),
-            google_worksheet_name=os.getenv("GOOGLE_SHEET_WORKSHEET", "Sheet1"),
+            google_worksheet_name=worksheet_env,
             cache_db_path=os.getenv("CACHE_DB_PATH", "./cache/materials.db"),
             cache_ttl_seconds=int(os.getenv("CACHE_TTL_SECONDS", "86400")),
             request_delay_seconds=float(os.getenv("REQUEST_DELAY_SECONDS", "1.0")),
             enable_known_sites=os.getenv("ENABLE_KNOWN_SITE_SEARCH", "true").lower() == "true",
             known_sites_only=os.getenv("KNOWN_SITE_SEARCH_ONLY", "false").lower() == "true",
+            max_parallel_material_searches=max(
+                1,
+                int(os.getenv("MAX_PARALLEL_MATERIAL_SEARCHES", "4")),
+            ),
             use_bing=os.getenv("USE_BING_SEARCH", "false").lower() == "true",
             bing_api_key=os.getenv("BING_API_KEY"),
             use_chatgpt_search=use_chatgpt_search,
@@ -341,6 +352,8 @@ class ConstructionAIAgent:
             logger.info("Materials database assistant is disabled")
     
         self.default_timeout_seconds = self.config.default_timeout_seconds
+        self._batch_rate_lock = Lock()
+        self._last_batch_request_ts = 0.0
         
         self.project_chat_agent: Optional[ProjectChatAgent] = None
         if self.config.enable_project_chat:
@@ -361,6 +374,7 @@ class ConstructionAIAgent:
                     project_root=Path(__file__).resolve().parent,
                     context_files=context_files,
                     max_history_turns=self.config.project_chat_max_history_turns,
+                    request_timeout=self.config.llm_request_timeout,
                     **agent_kwargs,
                 )
                 logger.info("Project chat agent initialized")
@@ -473,7 +487,7 @@ class ConstructionAIAgent:
                     raise SearchTimeoutError(
                         f"Time limit exceeded after analysis for '{material_name}'"
                     )
-                result = self.material_agent._resolve_material(
+                result = self.material_agent.resolve_material(
                     material_name,
                     analysis,
                     use_scraping,
@@ -515,18 +529,43 @@ class ConstructionAIAgent:
         Returns:
             Список результатов
         """
-        results = []
-        for material in materials:
+        if not materials:
+            return []
+
+        max_workers = max(
+            1,
+            min(self.config.max_parallel_material_searches, len(materials)),
+        )
+
+        def _search_material(index: int, name: str) -> tuple[int, MaterialResult]:
+            self._wait_for_batch_slot()
             result = self.find_material_price(
-                material,
+                name,
                 use_cache=use_cache,
                 use_scraping=use_scraping,
                 timeout_seconds=timeout_seconds,
                 exact_match_only=exact_match_only,
             )
-            results.append(result)
-            time.sleep(self.config.request_delay_seconds)
-        return results
+            return index, result
+
+        if len(materials) == 1 or max_workers == 1:
+            sequential_results: List[MaterialResult] = []
+            for idx, material in enumerate(materials):
+                _, result = _search_material(idx, material)
+                sequential_results.append(result)
+            return sequential_results
+
+        ordered_results: List[Optional[MaterialResult]] = [None] * len(materials)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                executor.submit(_search_material, idx, material)
+                for idx, material in enumerate(materials)
+            ]
+            for future in as_completed(futures):
+                index, result = future.result()
+                ordered_results[index] = result
+
+        return [result for result in ordered_results if result is not None]
     
     # ========================================================================
     # ПРОЕКТНЫЙ ЧАТ: Диалог об устройстве репозитория
@@ -659,6 +698,25 @@ class ConstructionAIAgent:
 
         return result
     
+    def _wait_for_batch_slot(self) -> None:
+        """Throttle batch execution to respect request delay settings."""
+        min_interval = max(0.0, self.config.request_delay_seconds)
+        if min_interval <= 0:
+            return
+
+        with self._batch_rate_lock:
+            now = time.monotonic()
+            last = self._last_batch_request_ts
+            if last == 0.0:
+                self._last_batch_request_ts = now
+                return
+
+            elapsed = now - last
+            if elapsed < min_interval:
+                time.sleep(min_interval - elapsed)
+                now = time.monotonic()
+            self._last_batch_request_ts = now
+    
     def materials_to_markdown(self, results: List[MaterialResult]) -> str:
         """Конвертировать результаты в Markdown таблицу."""
         if not results:
@@ -696,6 +754,27 @@ class ConstructionAIAgent:
             return "❌ Google Sheets AI not initialized. Set GOOGLE_SHEET_ID in .env"
         
         return self.sheets_ai.process_command(command)
+
+    def chat_about_sheets(self, message: str, *, reset_history: bool = False) -> str:
+        """Отправить сообщение в чат Google Sheets."""
+        if not self.sheets_ai:
+            return "❌ Google Sheets AI not initialized. Set GOOGLE_SHEET_ID in .env"
+        return self.sheets_ai.process_command(message, reset=reset_history)
+
+    def reset_sheets_chat(self) -> str:
+        """Сбросить историю чата Google Sheets и вернуть системное сообщение."""
+        if not self.sheets_ai:
+            return "❌ Google Sheets AI not initialized. Set GOOGLE_SHEET_ID in .env"
+        self.sheets_ai.reset_chat()
+        system_message = "История чата Google Sheets сброшена."
+        self.sheets_ai.append_system_message(system_message)
+        return system_message
+
+    def get_sheets_chat_history(self) -> List[Dict[str, str]]:
+        """Получить историю чата Google Sheets."""
+        if not self.sheets_ai:
+            return []
+        return self.sheets_ai.get_chat_history()
     
     def read_sheet_data(self, worksheet_name: Optional[str] = None) -> List[List[str]]:
         """Прочитать данные из Google Sheets."""
@@ -894,13 +973,30 @@ class ConstructionAIAgent:
 - Всегда возвращай валидный JSON-объект."""
         
         try:
+            classification_schema = {
+                "type": "object",
+                "properties": {
+                    "command_type": {"type": "string"},
+                    "parameters": {"type": "object", "additionalProperties": True},
+                    "explanation": {"type": "string"},
+                },
+                "required": ["command_type"],
+                "additionalProperties": True,
+            }
+
             response = self.openai_client.chat.completions.create(
                 model=self.config.llm_model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": command},
                 ],
-                response_format={"type": "json_object"},
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "command_classification",
+                        "schema": classification_schema,
+                    },
+                },
             )
             
             content = response.choices[0].message.content if response.choices else ""
