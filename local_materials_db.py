@@ -9,11 +9,20 @@ from __future__ import annotations
 
 import csv
 import logging
+import os
 import re
+import threading
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Callable, Iterable, List, Optional
+
+try:  # pragma: no cover - optional dependency
+    from watchdog.events import FileSystemEventHandler
+    from watchdog.observers import Observer
+except Exception:  # noqa: BLE001 - best effort optional import
+    Observer = None
+    FileSystemEventHandler = object  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -114,22 +123,57 @@ class _LocalMaterialEntry:
 class LocalMaterialDatabase:
     """Loads and searches a CSV with locally curated materials."""
 
-    def __init__(self, csv_path: Path) -> None:
+    def __init__(self, csv_path: Path, *, auto_refresh: Optional[bool] = None) -> None:
         self._entries: List[_LocalMaterialEntry] = []
         self._loaded = False
         self._path = csv_path
+        self._last_mtime: Optional[float] = None
+        if auto_refresh is None:
+            env_value = os.getenv("LOCAL_DB_AUTO_REFRESH", "true").lower()
+            auto_refresh = env_value in {"1", "true", "yes", "on"}
+        self._auto_refresh = auto_refresh
+        self._observer: Optional[Observer] = None
+        self._watchdog_handler: Optional[_CSVWatchdogHandler] = None
+        debounce_raw = os.getenv("LOCAL_DB_WATCHDOG_DEBOUNCE_SECONDS", "1.0")
+        try:
+            self._watchdog_debounce = float(debounce_raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid LOCAL_DB_WATCHDOG_DEBOUNCE_SECONDS value %r; using 1.0", debounce_raw
+            )
+            self._watchdog_debounce = 1.0
+
         self._load()
+        if self._should_use_watchdog():  # pragma: no cover - optional runtime path
+            self._start_watchdog()
 
     def _load(self) -> None:
         if not self._path.exists():
             logger.info("Local materials CSV not found at %s", self._path)
+            self._entries = []
+            self._loaded = False
+            self._last_mtime = None
             return
+
+        try:
+            current_mtime = self._path.stat().st_mtime
+        except OSError as exc:  # pragma: no cover - stat errors are rare
+            logger.error("Failed to stat local materials CSV %s: %s", self._path, exc)
+            self._entries = []
+            self._loaded = False
+            self._last_mtime = None
+            return
+
+        new_entries: List[_LocalMaterialEntry] = []
 
         try:
             with self._path.open("r", encoding="utf-8-sig", newline="") as handle:
                 reader = csv.DictReader(handle)
                 if reader.fieldnames is None:
                     logger.warning("Local materials CSV at %s has no headers", self._path)
+                    self._entries = []
+                    self._loaded = False
+                    self._last_mtime = current_mtime
                     return
 
                 normalized_headers = [header.strip() for header in reader.fieldnames]
@@ -144,16 +188,21 @@ class LocalMaterialDatabase:
 
                     entry = self._build_entry(normalized_row)
                     if entry:
-                        self._entries.append(entry)
+                        new_entries.append(entry)
 
+            self._entries = new_entries
+            self._loaded = True
+            self._last_mtime = current_mtime
             logger.info(
                 "Loaded %d materials from local CSV %s",
                 len(self._entries),
                 self._path,
             )
-            self._loaded = True
         except Exception as exc:  # noqa: BLE001
             logger.error("Failed to load local materials CSV %s: %s", self._path, exc)
+            self._entries = []
+            self._loaded = False
+            self._last_mtime = current_mtime
 
     def _build_entry(self, row: dict) -> Optional[_LocalMaterialEntry]:
         raw_name_values = [
@@ -233,6 +282,9 @@ class LocalMaterialDatabase:
         exact_only: bool = False,
         limit: int = 10,
     ) -> List[LocalMaterialMatch]:
+        if self._auto_refresh:
+            self._ensure_fresh()
+
         if not self.available:
             return []
 
@@ -266,3 +318,110 @@ class LocalMaterialDatabase:
         self._entries.clear()
         self._loaded = False
         self._load()
+
+    def close(self) -> None:  # pragma: no cover - cleanup helper
+        if self._observer:
+            self._observer.stop()
+            self._observer.join(timeout=2)
+            self._observer = None
+        if self._watchdog_handler:
+            self._watchdog_handler.shutdown()
+            self._watchdog_handler = None
+
+    def _ensure_fresh(self) -> None:
+        if not self._path.exists():
+            if self._entries:
+                logger.info("Local materials CSV at %s removed; clearing cache", self._path)
+                self._entries.clear()
+            self._loaded = False
+            self._last_mtime = None
+            return
+
+        try:
+            current_mtime = self._path.stat().st_mtime
+        except OSError as exc:  # pragma: no cover - stat errors are rare
+            logger.debug("Unable to stat %s for auto refresh: %s", self._path, exc)
+            return
+
+        if self._last_mtime is None or current_mtime > self._last_mtime:
+            logger.info("Detected change in %s; refreshing local DB", self._path)
+            self.refresh()
+
+    def _should_use_watchdog(self) -> bool:
+        if not self._auto_refresh:
+            return False
+        use_watchdog = os.getenv("LOCAL_DB_USE_WATCHDOG", "false").lower()
+        return Observer is not None and use_watchdog in {"1", "true", "yes", "on"}
+
+    def _start_watchdog(self) -> None:  # pragma: no cover - optional runtime path
+        assert Observer is not None  # noqa: S101 - ensured by caller
+
+        handler = _CSVWatchdogHandler(
+            target_path=self._path,
+            callback=self.refresh,
+            debounce_seconds=self._watchdog_debounce,
+        )
+        observer = Observer()
+        observer.schedule(handler, self._path.parent.as_posix(), recursive=False)
+        observer.daemon = True
+        observer.start()
+        self._observer = observer
+        self._watchdog_handler = handler
+
+
+class _CSVWatchdogHandler(FileSystemEventHandler):  # pragma: no cover - optional runtime path
+    """Debounced watchdog handler that triggers refreshes."""
+
+    def __init__(
+        self,
+        *,
+        target_path: Path,
+        callback: Callable[[], None],
+        debounce_seconds: float,
+    ) -> None:
+        self._target_path = target_path.resolve()
+        self._callback = callback
+        self._debounce = max(debounce_seconds, 0.0)
+        self._timer: Optional[threading.Timer] = None
+        self._lock = threading.Lock()
+
+    def on_modified(self, event) -> None:  # type: ignore[override]
+        self._handle_event(event)
+
+    def on_created(self, event) -> None:  # type: ignore[override]
+        self._handle_event(event)
+
+    def on_moved(self, event) -> None:  # type: ignore[override]
+        self._handle_event(event)
+
+    def shutdown(self) -> None:
+        with self._lock:
+            if self._timer:
+                self._timer.cancel()
+                self._timer = None
+
+    def _handle_event(self, event) -> None:
+        try:
+            is_directory = bool(getattr(event, "is_directory", False))
+            src_path = Path(getattr(event, "src_path", ""))
+            dest_path = Path(getattr(event, "dest_path", ""))
+        except TypeError:  # pragma: no cover - defensive
+            return
+
+        if is_directory:
+            return
+
+        if src_path.resolve() != self._target_path and dest_path.resolve() != self._target_path:
+            return
+
+        with self._lock:
+            if self._timer:
+                self._timer.cancel()
+
+            if self._debounce <= 0:
+                self._callback()
+                return
+
+            self._timer = threading.Timer(self._debounce, self._callback)
+            self._timer.daemon = True
+            self._timer.start()
