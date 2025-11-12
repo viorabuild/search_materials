@@ -118,3 +118,44 @@ def test_pending_cleanup_drops_missing_records(tmp_path):
         persisted = json.load(handle)
 
     assert persisted["changes"] == []
+
+
+def test_pending_cleanup_skips_when_sheet_unavailable(tmp_path, monkeypatch):
+    csv_path = tmp_path / "materials.csv"
+    cache_path = tmp_path / "cache" / "materials_pending.json"
+    _write_csv(csv_path, [["MAT-200", "Материал", "75"]])
+
+    assistant = MaterialsDatabaseAssistant(
+        csv_path=csv_path,
+        llm_client=_DummyLLM(),
+        llm_model="dummy",
+        sync_csv=False,
+        pending_cache_path=cache_path,
+        pending_expiration_seconds=None,
+    )
+
+    assistant._stage_update(
+        "MAT-200",
+        {"Стоимость": "80"},
+        reason=None,
+        worksheet_hint=None,
+    )
+
+    assert assistant.pending_count() == 1
+
+    csv_path.unlink()
+
+    monkeypatch.setattr("materials_db_assistant.gspread", None)
+
+    assistant_reloaded = MaterialsDatabaseAssistant(
+        csv_path=csv_path,
+        llm_client=_DummyLLM(),
+        llm_model="dummy",
+        sync_csv=False,
+        sheet_id="fake-sheet",
+        worksheet_name="Main",
+        pending_cache_path=cache_path,
+        pending_expiration_seconds=None,
+    )
+
+    assert assistant_reloaded.pending_count() == 1
