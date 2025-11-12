@@ -13,7 +13,7 @@
 
 ## Требования
 - Python 3.10 или новее.
-- Ключ OpenAI (переменная `OPENAI_API_KEY`).
+- Ключ OpenAI (`OPENAI_API_KEY`) **или** включённая локальная LLM (`ENABLE_LOCAL_LLM=true`).
 - (Опционально) сервисный аккаунт Google для доступа к Google Sheets.
 - (Опционально) локальная LLM с OpenAI-совместимым API (например, LM Studio) для резервного режима.
 
@@ -48,7 +48,7 @@ print(result)
 
 ## Конфигурация
 Ключевые переменные `.env`:
-- `OPENAI_API_KEY` — обязательный ключ OpenAI.
+- `OPENAI_API_KEY` — ключ OpenAI (обязателен, если не используется локальная LLM).
 - `GOOGLE_SERVICE_ACCOUNT_FILE` или `GOOGLE_SERVICE_ACCOUNT_JSON` — путь к файлу сервисного аккаунта.
 - `GOOGLE_SHEET_ID`, `GOOGLE_SHEET_WORKSHEET` — целевая таблица и лист.
 - `LOCAL_MATERIALS_CSV_PATH` — путь к локальной базе материалов (по умолчанию `./data/local_materials.csv`).
@@ -63,6 +63,17 @@ print(result)
 Если вы подключаете Google Sheets, обязательно предоставьте сервисному аккаунту права на редактирование таблицы (через «Поделиться» → email из `credentials/service-account.json`).
 
 Полный список параметров см. в [`docs/quickstart.md`](docs/quickstart.md).
+
+### Валидация конфигурации
+`ConstructionAIAgentConfig.validate()` автоматически вызывается при создании `ConstructionAIAgent` и проверяет обязательные комбинации настроек.
+
+Примеры сообщений об ошибках:
+- `OPENAI_API_KEY is required unless ENABLE_LOCAL_LLM=true` — нет ключа OpenAI и отключена локальная LLM.
+- `Google Sheets integration requires GOOGLE_SERVICE_ACCOUNT_PATH or GOOGLE_SERVICE_ACCOUNT_JSON` — указан `GOOGLE_SHEET_ID`, но не задан сервисный аккаунт.
+- `Local materials CSV not found at ...` — включена локальная база (`ENABLE_LOCAL_MATERIAL_DB=true`), однако CSV отсутствует.
+- `Materials DB assistant requires LOCAL_MATERIALS_CSV_PATH or MATERIALS_DB_SHEET_ID` — помощнику базы не из чего читать данные.
+
+Настройте `.env`, чтобы выполнить требования конкретной функции, или отключите соответствующие опции.
 
 ## Структура проекта
 ```

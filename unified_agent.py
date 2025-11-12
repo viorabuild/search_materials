@@ -173,6 +173,74 @@ class ConstructionAIAgentConfig:
             project_chat_max_history_turns=int(os.getenv("PROJECT_CHAT_MAX_HISTORY_TURNS", "6")),
         )
 
+    def validate(self) -> None:
+        """Проверить согласованность конфигурации и обязательные параметры."""
+
+        errors: List[str] = []
+
+        has_openai_key = bool(self.openai_api_key)
+        if not has_openai_key and not self.enable_local_llm:
+            errors.append(
+                "OPENAI_API_KEY is required unless ENABLE_LOCAL_LLM=true."
+            )
+
+        if self.enable_local_llm:
+            if not self.local_llm_base_url:
+                errors.append(
+                    "ENABLE_LOCAL_LLM=true requires LOCAL_LLM_BASE_URL to be set."
+                )
+            if not self.local_llm_model:
+                errors.append(
+                    "ENABLE_LOCAL_LLM=true requires LOCAL_LLM_MODEL to be set."
+                )
+
+        google_service_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+        if self.google_sheet_id:
+            if not self.google_service_account_path and not google_service_json:
+                errors.append(
+                    "Google Sheets integration requires GOOGLE_SERVICE_ACCOUNT_PATH or GOOGLE_SERVICE_ACCOUNT_JSON."
+                )
+            if self.google_service_account_path:
+                service_path = Path(self.google_service_account_path).expanduser()
+                if not service_path.exists():
+                    errors.append(
+                        f"Google service account file not found at {service_path}."
+                    )
+
+        local_csv_path: Optional[Path] = None
+        if self.local_materials_csv_path:
+            local_csv_path = Path(self.local_materials_csv_path).expanduser()
+
+        if self.enable_local_db:
+            if local_csv_path is None:
+                errors.append(
+                    "ENABLE_LOCAL_MATERIAL_DB=true requires LOCAL_MATERIALS_CSV_PATH to be set."
+                )
+            elif not local_csv_path.exists():
+                errors.append(
+                    f"Local materials CSV not found at {local_csv_path}."
+                )
+
+        if self.enable_materials_db_assistant:
+            csv_available = bool(local_csv_path and local_csv_path.exists())
+            sheet_available = bool(self.materials_db_sheet_id)
+            if not csv_available and not sheet_available:
+                errors.append(
+                    "Materials DB assistant requires LOCAL_MATERIALS_CSV_PATH or MATERIALS_DB_SHEET_ID."
+                )
+            if sheet_available and not (
+                self.google_service_account_path or google_service_json
+            ):
+                errors.append(
+                    "Materials DB assistant with Google Sheets requires GOOGLE_SERVICE_ACCOUNT_PATH or GOOGLE_SERVICE_ACCOUNT_JSON."
+                )
+
+        if errors:
+            formatted = "\n - ".join(errors)
+            raise ValueError(
+                f"Invalid ConstructionAIAgent configuration:\n - {formatted}"
+            )
+
 
 class ConstructionAIAgent:
     """
@@ -195,9 +263,7 @@ class ConstructionAIAgent:
             config: Конфигурация агента (если None, загружается из .env)
         """
         self.config = config or ConstructionAIAgentConfig.from_env()
-
-        if not self.config.openai_api_key and not self.config.enable_local_llm:
-            raise ValueError("OPENAI_API_KEY is required unless ENABLE_LOCAL_LLM=true")
+        self.config.validate()
 
         if self.config.llm_model.startswith("gpt-5-nano") and self.config.temperature != 1.0:
             logger.warning(
