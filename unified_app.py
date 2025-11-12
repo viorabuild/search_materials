@@ -63,12 +63,26 @@ def get_stats():
     """Получить статистику агента."""
     if not agent:
         return jsonify({'error': 'Agent not initialized'}), 500
-    
+
     try:
         stats = agent.get_stats()
         return jsonify(stats)
     except Exception as e:
         logger.error("Error getting stats: %s", e)
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/diagnostics', methods=['GET'])
+def get_diagnostics():
+    """Получить диагностический отчёт агента."""
+    if not agent:
+        return jsonify({'error': 'Agent not initialized'}), 500
+
+    try:
+        diagnostics = agent.get_diagnostics()
+        return jsonify(diagnostics)
+    except Exception as e:
+        logger.error("Error getting diagnostics: %s", e)
         return jsonify({'error': str(e)}), 500
 
 
