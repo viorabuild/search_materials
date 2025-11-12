@@ -2,6 +2,9 @@ import os
 import re
 import json
 import difflib
+import logging
+import threading
+import time
 from typing import List, Dict, Any, Optional, Set
 from urllib.parse import urlparse
 
@@ -9,13 +12,30 @@ import gspread
 import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-from gspread.exceptions import WorksheetNotFound
+from gspread.exceptions import WorksheetNotFound, APIError
 from gspread.utils import a1_range_to_grid_range
 from openai import OpenAI
 from tabulate import tabulate
+from tenacity import (
+    Retrying,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
+
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
+
+
+class GoogleAPIRateLimitError(RuntimeError):
+    """Ошибка ограничения частоты обращений к Google API."""
+
+    def __init__(self, message: str, code: str = "GOOGLE_RATE_LIMIT_EXCEEDED"):
+        super().__init__(message)
+        self.code = code
+        self.message = message
 
 
 def _column_letter(index: int) -> str:
@@ -171,12 +191,96 @@ class GoogleSheetsAI:
         self.search_max_rounds = int(os.getenv('SEARCH_MAX_REQUESTS', '2'))
         self.search_max_results = int(os.getenv('SEARCH_MAX_RESULTS', '5'))
 
+        self._requests_retryer = self._build_requests_retryer()
+        self._google_retryer = self._build_google_retryer()
+        self._init_google_rate_limiter()
+
         self.gspread_client = self._create_gspread_client()
         self.spreadsheet = self.gspread_client.open_by_key(self.sheet_id)
         self.worksheet = self._get_or_create_worksheet(self.spreadsheet, self.worksheet_name)
-        
+
         # Initialize estimate checker if available
         self.estimate_checker = EstimateChecker(self) if ESTIMATE_CHECKER_AVAILABLE else None
+
+    def _build_requests_retryer(self) -> Retrying:
+        attempts = max(1, int(os.getenv('NETWORK_RETRY_ATTEMPTS', '3')))
+        multiplier = float(os.getenv('NETWORK_RETRY_BACKOFF_MULTIPLIER', '1'))
+        max_wait = max(1.0, float(os.getenv('NETWORK_RETRY_MAX_WAIT_SECONDS', '10')))
+        return Retrying(
+            stop=stop_after_attempt(attempts),
+            wait=wait_exponential(multiplier=multiplier, min=1, max=max_wait),
+            retry=retry_if_exception_type(requests.exceptions.RequestException),
+            reraise=True,
+        )
+
+    def _build_google_retryer(self) -> Retrying:
+        attempts = max(1, int(os.getenv('GOOGLE_API_RETRY_ATTEMPTS', '3')))
+        multiplier = float(os.getenv('GOOGLE_API_RETRY_BACKOFF_MULTIPLIER', '1'))
+        max_wait = max(1.0, float(os.getenv('GOOGLE_API_RETRY_MAX_WAIT_SECONDS', '10')))
+        return Retrying(
+            stop=stop_after_attempt(attempts),
+            wait=wait_exponential(multiplier=multiplier, min=1, max=max_wait),
+            retry=retry_if_exception_type(APIError),
+            reraise=True,
+        )
+
+    def _init_google_rate_limiter(self) -> None:
+        tokens_raw = os.getenv('GOOGLE_API_RATE_TOKENS', '10')
+        interval_raw = os.getenv('GOOGLE_API_RATE_INTERVAL_SECONDS', '60')
+        error_code = os.getenv('GOOGLE_API_RATE_ERROR_CODE', 'GOOGLE_RATE_LIMIT_EXCEEDED')
+
+        try:
+            capacity = int(tokens_raw)
+        except (TypeError, ValueError):
+            capacity = 10
+        self._google_api_capacity = max(1, capacity)
+
+        try:
+            interval = float(interval_raw)
+        except (TypeError, ValueError):
+            interval = 60.0
+        self._google_api_interval = max(0.1, interval)
+
+        self._google_api_rate_error_code = error_code or 'GOOGLE_RATE_LIMIT_EXCEEDED'
+        self._google_api_tokens = self._google_api_capacity
+        self._google_api_last_refill = time.monotonic()
+        self._google_api_lock = threading.Lock()
+
+    def _refill_google_api_tokens(self) -> None:
+        now = time.monotonic()
+        elapsed = now - self._google_api_last_refill
+        if elapsed >= self._google_api_interval:
+            self._google_api_tokens = self._google_api_capacity
+            self._google_api_last_refill = now
+
+    def _acquire_google_api_token(self) -> None:
+        with self._google_api_lock:
+            self._refill_google_api_tokens()
+            if self._google_api_tokens <= 0:
+                logger.warning(
+                    "Google API rate limit exceeded (capacity=%s, interval=%s)",
+                    self._google_api_capacity,
+                    self._google_api_interval,
+                )
+                raise GoogleAPIRateLimitError(
+                    (
+                        "Превышено количество запросов к Google API: "
+                        f"доступно {self._google_api_capacity} запросов за {self._google_api_interval} с"
+                    ),
+                    code=self._google_api_rate_error_code,
+                )
+            self._google_api_tokens -= 1
+
+    def _call_with_requests_retry(self, func, *args, **kwargs):
+        for attempt in self._requests_retryer:
+            with attempt:
+                return func(*args, **kwargs)
+
+    def _call_google_api(self, func, *args, **kwargs):
+        self._acquire_google_api_token()
+        for attempt in self._google_retryer:
+            with attempt:
+                return func(*args, **kwargs)
 
     def _create_gspread_client(self) -> gspread.Client:
         """Создание gspread клиента на основе сервисного аккаунта"""
@@ -290,7 +394,8 @@ class GoogleSheetsAI:
 
         self._ensure_domain_allowed(normalized_url)
 
-        response = requests.get(
+        response = self._call_with_requests_retry(
+            requests.get,
             normalized_url,
             headers={"User-Agent": "Mozilla/5.0 (compatible; GoogleSheetsAI/1.0)"},
             timeout=self.fetch_timeout,
@@ -324,7 +429,8 @@ class GoogleSheetsAI:
             "num": self.search_max_results,
         }
 
-        response = requests.get(
+        response = self._call_with_requests_retry(
+            requests.get,
             "https://serpapi.com/search.json",
             params=params,
             timeout=self.fetch_timeout,
@@ -366,8 +472,13 @@ class GoogleSheetsAI:
             return
 
         worksheet = self._resolve_worksheet(worksheet_name)
-        worksheet.clear()
-        worksheet.update('A1', data, value_input_option="USER_ENTERED")
+        self._call_google_api(worksheet.clear)
+        self._call_google_api(
+            worksheet.update,
+            'A1',
+            data,
+            value_input_option="USER_ENTERED",
+        )
 
         if title:
             try:
@@ -395,12 +506,16 @@ class GoogleSheetsAI:
                 rows_to_append = rows[1:]
 
         if rows_to_append:
-            worksheet.append_rows(rows_to_append, value_input_option="USER_ENTERED")
+            self._call_google_api(
+                worksheet.append_rows,
+                rows_to_append,
+                value_input_option="USER_ENTERED",
+            )
 
     def update_cell(self, row: int, col: int, value: str, worksheet_name: Optional[str] = None):
         """Обновление конкретной ячейки (0-indexed)"""
         worksheet = self._resolve_worksheet(worksheet_name)
-        worksheet.update_cell(row + 1, col + 1, value)
+        self._call_google_api(worksheet.update_cell, row + 1, col + 1, value)
 
     def format_range(self, range_a1: str, format_spec: Dict[str, Any], worksheet_name: Optional[str] = None) -> str:
         """Применение форматирования к диапазону."""
@@ -755,6 +870,8 @@ WEB_SEARCH возвращает краткий список ссылок и оп
 
                 return f"✅ {explanation}\n{normalized_result}"
 
+        except GoogleAPIRateLimitError as rate_error:
+            return f"❌ Ошибка {rate_error.code}: {rate_error.message}"
         except Exception as e:
             return f"❌ Ошибка: {str(e)}"
 
