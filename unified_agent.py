@@ -18,6 +18,7 @@ import logging
 import os
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence
 from dataclasses import dataclass
@@ -186,7 +187,20 @@ class ConstructionAIAgent:
     - Кэширование результатов
     - LangChain интеграция для сложных задач
     """
-    
+
+    def _set_component_status(
+        self,
+        component: str,
+        status: str,
+        details: Optional[str] = None,
+    ) -> None:
+        """Обновить статус подсистемы в диагностическом отчёте."""
+
+        self._component_statuses[component] = {
+            "status": status,
+            "details": details if details is None else str(details),
+        }
+
     def __init__(self, config: Optional[ConstructionAIAgentConfig] = None):
         """
         Инициализация единого агента.
@@ -195,6 +209,8 @@ class ConstructionAIAgent:
             config: Конфигурация агента (если None, загружается из .env)
         """
         self.config = config or ConstructionAIAgentConfig.from_env()
+        self._component_statuses: Dict[str, Dict[str, Optional[str]]] = {}
+        self._gspread_init_error: Optional[str] = None
 
         if not self.config.openai_api_key and not self.config.enable_local_llm:
             raise ValueError("OPENAI_API_KEY is required unless ENABLE_LOCAL_LLM=true")
@@ -218,25 +234,36 @@ class ConstructionAIAgent:
         )
 
         self.openai_client = FallbackOpenAI(fallback_config)
-        
+        self._set_component_status("openai_client", "success")
+
         # Инициализация базового агента для поиска материалов
-        self.material_agent = MaterialPriceAgent(
-            openai_api_key=self.config.openai_api_key,
-            openai_client=self.openai_client,
-            google_service_account_path=self.config.google_service_account_path if self.config.google_service_account_path and Path(self.config.google_service_account_path).exists() else None,
-            llm_model=self.config.llm_model,
-            temperature=self.config.temperature,
-            request_delay_seconds=self.config.request_delay_seconds,
-            enable_known_sites=self.config.enable_known_sites,
-            known_sites_only=self.config.known_sites_only,
-        )
-        
+        try:
+            self.material_agent = MaterialPriceAgent(
+                openai_api_key=self.config.openai_api_key,
+                openai_client=self.openai_client,
+                google_service_account_path=self.config.google_service_account_path if self.config.google_service_account_path and Path(self.config.google_service_account_path).exists() else None,
+                llm_model=self.config.llm_model,
+                temperature=self.config.temperature,
+                request_delay_seconds=self.config.request_delay_seconds,
+                enable_known_sites=self.config.enable_known_sites,
+                known_sites_only=self.config.known_sites_only,
+            )
+            self._set_component_status("material_price_agent", "success")
+        except Exception as exc:  # noqa: BLE001
+            self._set_component_status("material_price_agent", "error", str(exc))
+            raise
+
         # Инициализация кэш-менеджера
-        self.cache = CacheManager(
-            db_path=Path(self.config.cache_db_path),
-            cache_ttl_seconds=self.config.cache_ttl_seconds,
-        )
-        
+        try:
+            self.cache = CacheManager(
+                db_path=Path(self.config.cache_db_path),
+                cache_ttl_seconds=self.config.cache_ttl_seconds,
+            )
+            self._set_component_status("cache_manager", "success")
+        except Exception as exc:  # noqa: BLE001
+            self._set_component_status("cache_manager", "error", str(exc))
+            raise
+
         # Инициализация Google Sheets AI (если настроен)
         self.sheets_ai = None
         if self.config.google_sheet_id:
@@ -248,18 +275,48 @@ class ConstructionAIAgent:
                     llm_model=self.config.llm_model,
                 )
                 logger.info("Google Sheets AI initialized")
+                self._set_component_status("google_sheets_ai", "success")
             except Exception as e:
                 logger.warning("Failed to initialize Google Sheets AI: %s", e)
-        
+                self._set_component_status("google_sheets_ai", "error", str(e))
+        else:
+            self._set_component_status(
+                "google_sheets_ai",
+                "disabled",
+                "GOOGLE_SHEET_ID not configured",
+            )
+
         self._gspread_client: Optional[gspread.Client] = None
         if self.sheets_ai:
             self._gspread_client = self.sheets_ai.gspread_client
         else:
             self._gspread_client = self._create_gspread_client()
-        
+
+        if self._gspread_client:
+            self._set_component_status("gspread_client", "success")
+        else:
+            if self.config.google_sheet_id:
+                details = self._gspread_init_error or "Google Sheets configured but client unavailable"
+                self._set_component_status("gspread_client", "error", details)
+            elif self.config.google_service_account_path or os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON"):
+                details = self._gspread_init_error or "Google credentials configured but client unavailable"
+                self._set_component_status("gspread_client", "error", details)
+            else:
+                self._set_component_status(
+                    "gspread_client",
+                    "disabled",
+                    "Google credentials not provided",
+                )
+
         # Инициализация продвинутого агента (если настроен)
         self.advanced_agent = None
         self._advanced_agent_error: Optional[Exception] = None
+        if not self.config.enable_web_search:
+            self._set_component_status(
+                "advanced_agent",
+                "disabled",
+                "ENABLE_WEB_SEARCH is false",
+            )
         if self.config.enable_web_search:
             try:
                 advanced_module = importlib.import_module("advanced_agent")
@@ -278,15 +335,18 @@ class ConstructionAIAgent:
                     local_llm_api_key=self.config.local_llm_api_key,
                 )
                 logger.info("Advanced agent with web search initialized")
+                self._set_component_status("advanced_agent", "success")
             except ImportError as exc:
                 self._advanced_agent_error = exc
                 logger.info(
                     "Advanced agent module not found. Install 'advanced_agent' package "
                     "and set ENABLE_WEB_SEARCH=true to enable this feature."
                 )
+                self._set_component_status("advanced_agent", "error", str(exc))
             except Exception as e:
                 self._advanced_agent_error = e
                 logger.warning("Failed to initialize advanced agent: %s", e)
+                self._set_component_status("advanced_agent", "error", str(e))
 
         materials_csv_path = (
             Path(self.config.local_materials_csv_path)
@@ -303,10 +363,30 @@ class ConstructionAIAgent:
                         "Local materials database at %s is not available or empty",
                         materials_csv_path,
                     )
+                    self._set_component_status(
+                        "local_materials_db",
+                        "error",
+                        f"Database at {materials_csv_path} is not available or empty",
+                    )
+                else:
+                    self._set_component_status("local_materials_db", "success")
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Failed to initialize local materials database: %s", exc)
+                self._set_component_status("local_materials_db", "error", str(exc))
+        elif self.config.enable_local_db and not materials_csv_path:
+            logger.info("Local materials database enabled but CSV path not provided")
+            self._set_component_status(
+                "local_materials_db",
+                "error",
+                "LOCAL_MATERIALS_CSV_PATH not configured",
+            )
         else:
             logger.info("Local materials database is disabled")
+            self._set_component_status(
+                "local_materials_db",
+                "disabled",
+                "ENABLE_LOCAL_MATERIAL_DB is false",
+            )
 
         self.materials_db_assistant: Optional[MaterialsDatabaseAssistant] = None
         assistant_enabled = self.config.enable_materials_db_assistant and (
@@ -335,14 +415,27 @@ class ConstructionAIAgent:
                     local_db=self.local_materials_db,
                 )
                 logger.info("Materials database assistant initialized")
+                self._set_component_status("materials_db_assistant", "success")
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Failed to initialize materials DB assistant: %s", exc)
+                self._set_component_status("materials_db_assistant", "error", str(exc))
         else:
             logger.info("Materials database assistant is disabled")
+            self._set_component_status(
+                "materials_db_assistant",
+                "disabled",
+                "Materials DB assistant disabled in configuration",
+            )
     
         self.default_timeout_seconds = self.config.default_timeout_seconds
         
         self.project_chat_agent: Optional[ProjectChatAgent] = None
+        if not self.config.enable_project_chat:
+            self._set_component_status(
+                "project_chat_agent",
+                "disabled",
+                "ENABLE_PROJECT_CHAT is false",
+            )
         if self.config.enable_project_chat:
             try:
                 context_files = None
@@ -364,12 +457,26 @@ class ConstructionAIAgent:
                     **agent_kwargs,
                 )
                 logger.info("Project chat agent initialized")
+                self._set_component_status("project_chat_agent", "success")
             except Exception as exc:  # noqa: BLE001
                 self.project_chat_agent = None
                 logger.warning("Failed to initialize project chat agent: %s", exc)
+                self._set_component_status("project_chat_agent", "error", str(exc))
         else:
             logger.info("Project chat agent is disabled")
-    
+            if "project_chat_agent" not in self._component_statuses:
+                self._set_component_status(
+                    "project_chat_agent",
+                    "disabled",
+                    "ENABLE_PROJECT_CHAT is false",
+                )
+
+        self._set_component_status(
+            "estimate_checker",
+            "success" if ESTIMATE_CHECKER_AVAILABLE else "disabled",
+            None if ESTIMATE_CHECKER_AVAILABLE else "Estimate checker module not available",
+        )
+
         logger.info("ConstructionAIAgent initialized successfully")
     
     # ========================================================================
@@ -378,6 +485,7 @@ class ConstructionAIAgent:
 
     def _create_gspread_client(self) -> Optional[gspread.Client]:
         """Создать gspread клиента для работы с базой материалов."""
+        self._gspread_init_error = None
         json_credentials = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
         if json_credentials:
             try:
@@ -385,21 +493,88 @@ class ConstructionAIAgent:
                 return gspread.service_account_from_dict(credentials_dict)
             except json.JSONDecodeError as exc:
                 logger.warning("GOOGLE_SERVICE_ACCOUNT_JSON содержит некорректный JSON: %s", exc)
+                self._gspread_init_error = f"Invalid GOOGLE_SERVICE_ACCOUNT_JSON: {exc}"
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Failed to create gspread client from JSON: %s", exc)
+                self._gspread_init_error = f"Failed to create gspread client from JSON: {exc}"
 
         service_account_path = self.config.google_service_account_path
         if service_account_path:
             path = Path(service_account_path).expanduser()
             if not path.exists():
                 logger.warning("Google service account file not found at %s", path)
+                self._gspread_init_error = f"Service account file not found at {path}"
             else:
                 try:
                     return gspread.service_account(filename=str(path))
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("Failed to create gspread client from file %s: %s", path, exc)
+                    self._gspread_init_error = f"Failed to create gspread client from file: {exc}"
 
         return None
+
+    def get_diagnostics(self) -> Dict[str, Any]:
+        """Собрать диагностику по статусу всех подсистем агента."""
+
+        components: Dict[str, Dict[str, Any]] = {
+            name: dict(status)
+            for name, status in sorted(self._component_statuses.items())
+        }
+
+        if self.materials_db_assistant:
+            assistant_info = components.setdefault(
+                "materials_db_assistant",
+                {"status": "success", "details": None},
+            )
+            try:
+                assistant_info["pending_changes"] = self.materials_db_assistant.pending_count()
+            except Exception as exc:  # noqa: BLE001
+                assistant_info["pending_changes_error"] = str(exc)
+
+        if self.local_materials_db:
+            local_info = components.setdefault(
+                "local_materials_db",
+                {"status": "success", "details": None},
+            )
+            local_info["available"] = self.local_materials_db.available
+            if self.config.local_materials_csv_path:
+                local_info["csv_path"] = str(self.config.local_materials_csv_path)
+
+        if "google_sheets_ai" in components and self.config.google_sheet_id:
+            components["google_sheets_ai"]["sheet_id"] = self.config.google_sheet_id
+
+        if "gspread_client" in components and self._gspread_init_error:
+            components["gspread_client"].setdefault("details", self._gspread_init_error)
+
+        diagnostics: Dict[str, Any] = {
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "components": components,
+            "advanced_agent_error": (
+                str(self._advanced_agent_error) if self._advanced_agent_error else None
+            ),
+            "config": {
+                "llm_model": self.config.llm_model,
+                "temperature": self.config.temperature,
+                "enable_web_search": self.config.enable_web_search,
+                "google_sheet_configured": bool(self.config.google_sheet_id),
+                "cache_db_path": str(self.config.cache_db_path),
+                "local_db_enabled": self.config.enable_local_db,
+                "materials_db_assistant_enabled": self.config.enable_materials_db_assistant,
+                "project_chat_enabled": self.config.enable_project_chat,
+                "local_llm_enabled": self.config.enable_local_llm,
+            },
+        }
+
+        if self.config.local_materials_csv_path:
+            diagnostics["config"]["local_materials_csv_path"] = str(
+                self.config.local_materials_csv_path
+            )
+        if self.config.materials_db_sheet_id:
+            diagnostics["config"]["materials_db_sheet_id"] = self.config.materials_db_sheet_id
+        if self._gspread_init_error:
+            diagnostics["gspread_last_error"] = self._gspread_init_error
+
+        return diagnostics
     
     def find_material_price(
         self,
@@ -851,7 +1026,12 @@ class ConstructionAIAgent:
             Результат выполнения
         """
         logger.info("Processing command: %s", command)
-        
+
+        normalized_command = command.strip().lower()
+        if normalized_command in {"agent diagnostics", "diagnostics", "диагностика"}:
+            diagnostics = self.get_diagnostics()
+            return json.dumps(diagnostics, indent=2, ensure_ascii=False)
+
         # Определение типа команды через LLM
         system_prompt = """Ты - классификатор команд для AI-агента.
 Определи тип команды и верни JSON со структурой:
@@ -1452,6 +1632,7 @@ def main():
     parser.add_argument("command", nargs="*", help="Command to execute")
     parser.add_argument("--interactive", "-i", action="store_true", help="Interactive mode")
     parser.add_argument("--stats", action="store_true", help="Show statistics")
+    parser.add_argument("--diagnostics", action="store_true", help="Show diagnostics report")
     
     args = parser.parse_args()
     
@@ -1478,7 +1659,12 @@ def main():
         stats = agent.get_stats()
         print(json.dumps(stats, indent=2, ensure_ascii=False))
         return
-    
+
+    if args.diagnostics:
+        diagnostics = agent.get_diagnostics()
+        print(json.dumps(diagnostics, indent=2, ensure_ascii=False))
+        return
+
     if args.interactive:
         print("🤖 Construction AI Agent - Interactive Mode")
         print("=" * 60)
@@ -1487,33 +1673,43 @@ def main():
         print("- Прочитай таблицу")
         print("- Проверь смету")
         print("- Найди в интернете [запрос]")
+        print("- agent diagnostics - показать состояние подсистем")
         print("- exit - выход\n")
-        
+
         while True:
             try:
                 command = input("💬 Команда: ").strip()
                 if command.lower() in ["exit", "quit", "выход"]:
                     print("👋 До свидания!")
                     break
-                
+
                 if not command:
                     continue
-                
+
+                if command.strip().lower() in {"agent diagnostics", "diagnostics", "диагностика"}:
+                    diagnostics = agent.get_diagnostics()
+                    print(json.dumps(diagnostics, indent=2, ensure_ascii=False))
+                    print("\n" + "-" * 60 + "\n")
+                    continue
+
                 print("\n⏳ Обработка...\n")
                 result = agent.process_command(command)
                 print(result)
                 print("\n" + "-" * 60 + "\n")
-            
             except KeyboardInterrupt:
                 print("\n👋 До свидания!")
                 break
             except Exception as e:
                 print(f"❌ Ошибка: {e}\n")
-    
+
     elif args.command:
         command = " ".join(args.command)
-        result = agent.process_command(command)
-        print(result)
+        if command.strip().lower() in {"agent diagnostics", "diagnostics", "диагностика"}:
+            diagnostics = agent.get_diagnostics()
+            print(json.dumps(diagnostics, indent=2, ensure_ascii=False))
+        else:
+            result = agent.process_command(command)
+            print(result)
     
     else:
         parser.print_help()
