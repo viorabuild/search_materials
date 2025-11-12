@@ -19,9 +19,10 @@ logger = logging.getLogger(__name__)
 @dataclass
 class CacheManager:
     """SQLite-based cache for material search results."""
-    
+
     db_path: Path
     cache_ttl_seconds: int = 86400  # 24 hours default
+    negative_cache_ttl_seconds: int = 900  # 15 minutes default for failures
     
     def __post_init__(self) -> None:
         """Initialize database and create tables."""
@@ -60,6 +61,23 @@ class CacheManager:
                     timestamp REAL,
                     created_at REAL DEFAULT (strftime('%s', 'now'))
                 )
+            """)
+
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS material_failure_cache (
+                    material_name TEXT PRIMARY KEY,
+                    failure_type TEXT,
+                    reason TEXT,
+                    result_json TEXT,
+                    timestamp REAL,
+                    ttl_seconds REAL,
+                    created_at REAL DEFAULT (strftime('%s', 'now'))
+                )
+            """)
+
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_failure_timestamp
+                ON material_failure_cache(timestamp)
             """)
             
             conn.commit()
@@ -104,6 +122,45 @@ class CacheManager:
             
             logger.debug("Cache miss for material '%s'", material_name)
             return None
+
+    def get_failed_material(self, material_name: str) -> Optional[Dict[str, Any]]:
+        """Retrieve cached failure information if it is still fresh."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute(
+                """
+                SELECT failure_type, reason, result_json, timestamp, ttl_seconds
+                FROM material_failure_cache
+                WHERE material_name = ?
+                """,
+                (material_name,),
+            )
+            row = cursor.fetchone()
+
+            if not row:
+                return None
+
+            expires_at = row["timestamp"] + row["ttl_seconds"]
+            now = time.time()
+
+            if expires_at <= now:
+                conn.execute(
+                    "DELETE FROM material_failure_cache WHERE material_name = ?",
+                    (material_name,),
+                )
+                conn.commit()
+                logger.debug("Expired failure cache entry removed for '%s'", material_name)
+                return None
+
+            result_json = row["result_json"]
+            result_data = json.loads(result_json) if result_json else None
+
+            return {
+                "failure_type": row["failure_type"],
+                "reason": row["reason"],
+                "result": result_data,
+                "expires_at": expires_at,
+            }
     
     def set_material(
         self,
@@ -141,6 +198,51 @@ class CacheManager:
             )
             conn.commit()
             logger.info("Cached material '%s'", material_name)
+
+    def set_failed_material(
+        self,
+        material_name: str,
+        reason: str,
+        failure_type: str,
+        ttl_seconds: Optional[float] = None,
+        result: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Store a failed search attempt with a limited TTL."""
+        ttl = ttl_seconds if ttl_seconds is not None else self.negative_cache_ttl_seconds
+        payload = json.dumps(result, ensure_ascii=False) if result else None
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO material_failure_cache
+                (material_name, failure_type, reason, result_json, timestamp, ttl_seconds)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    material_name,
+                    failure_type,
+                    reason,
+                    payload,
+                    time.time(),
+                    ttl,
+                ),
+            )
+            conn.commit()
+            logger.info(
+                "Cached failed attempt for material '%s' (type=%s, ttl=%.0fs)",
+                material_name,
+                failure_type,
+                ttl,
+            )
+
+    def clear_failed_material(self, material_name: str) -> None:
+        """Remove cached failure information for a material."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "DELETE FROM material_failure_cache WHERE material_name = ?",
+                (material_name,),
+            )
+            conn.commit()
     
     def get_search_results(self, query: str) -> Optional[str]:
         """Retrieve cached search results."""
@@ -192,9 +294,13 @@ class CacheManager:
                 "DELETE FROM search_results_cache WHERE timestamp < ?",
                 (cutoff,)
             )
+            cursor3 = conn.execute(
+                "DELETE FROM material_failure_cache WHERE timestamp + ttl_seconds < ?",
+                (time.time(),)
+            )
             conn.commit()
             
-            total_deleted = cursor1.rowcount + cursor2.rowcount
+            total_deleted = cursor1.rowcount + cursor2.rowcount + cursor3.rowcount
             logger.info("Cleared %d expired cache entries", total_deleted)
             return total_deleted
     
@@ -203,6 +309,7 @@ class CacheManager:
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("DELETE FROM material_cache")
             conn.execute("DELETE FROM search_results_cache")
+            conn.execute("DELETE FROM material_failure_cache")
             conn.commit()
             logger.info("Cleared all cache data")
     
@@ -215,6 +322,9 @@ class CacheManager:
             cursor = conn.execute("SELECT COUNT(*) FROM search_results_cache")
             searches_count = cursor.fetchone()[0]
             
+            cursor = conn.execute("SELECT COUNT(*) FROM material_failure_cache")
+            failures_count = cursor.fetchone()[0]
+            
             cursor = conn.execute(
                 "SELECT COUNT(*) FROM material_cache WHERE timestamp > ?",
                 (time.time() - self.cache_ttl_seconds,)
@@ -224,6 +334,7 @@ class CacheManager:
             return {
                 "total_materials": materials_count,
                 "total_searches": searches_count,
+                "total_failures": failures_count,
                 "fresh_materials": fresh_materials,
             }
 
@@ -250,6 +361,7 @@ def main() -> None:
         print(f"  Total materials: {stats['total_materials']}")
         print(f"  Fresh materials: {stats['fresh_materials']}")
         print(f"  Total searches: {stats['total_searches']}")
+        print(f"  Total failures: {stats['total_failures']}")
     
     if args.clear_expired:
         deleted = cache.clear_expired()
