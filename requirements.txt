@@ -21,6 +21,9 @@ tenacity>=9.0
 tabulate>=0.9
 python-dotenv>=1.0
 
+# Observability
+prometheus_client>=0.20
+
 # Web application
 flask>=3.0
 flask-cors>=4.0
