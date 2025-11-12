@@ -20,6 +20,7 @@ import sys
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence
+from pydantic import ValidationError
 from dataclasses import dataclass
 
 import gspread
@@ -81,6 +82,8 @@ class ConstructionAIAgentConfig:
     # Cache
     cache_db_path: str = "./cache/materials.db"
     cache_ttl_seconds: int = 86400
+    failure_cache_ttl_seconds: int = 900
+    timeout_cache_ttl_seconds: int = 300
     
     # Material search
     request_delay_seconds: float = 1.0
@@ -150,6 +153,8 @@ class ConstructionAIAgentConfig:
             google_worksheet_name=os.getenv("GOOGLE_SHEET_WORKSHEET", "Sheet1"),
             cache_db_path=os.getenv("CACHE_DB_PATH", "./cache/materials.db"),
             cache_ttl_seconds=int(os.getenv("CACHE_TTL_SECONDS", "86400")),
+            failure_cache_ttl_seconds=int(os.getenv("FAILURE_CACHE_TTL_SECONDS", "900")),
+            timeout_cache_ttl_seconds=int(os.getenv("TIMEOUT_CACHE_TTL_SECONDS", "300")),
             request_delay_seconds=float(os.getenv("REQUEST_DELAY_SECONDS", "1.0")),
             enable_known_sites=os.getenv("ENABLE_KNOWN_SITE_SEARCH", "true").lower() == "true",
             known_sites_only=os.getenv("KNOWN_SITE_SEARCH_ONLY", "false").lower() == "true",
@@ -235,6 +240,7 @@ class ConstructionAIAgent:
         self.cache = CacheManager(
             db_path=Path(self.config.cache_db_path),
             cache_ttl_seconds=self.config.cache_ttl_seconds,
+            negative_cache_ttl_seconds=self.config.failure_cache_ttl_seconds,
         )
         
         # Инициализация Google Sheets AI (если настроен)
@@ -441,6 +447,26 @@ class ConstructionAIAgent:
         try:
             # Проверка кэша
             if use_cache:
+                failed_cached = self.cache.get_failed_material(material_name)
+                if failed_cached:
+                    logger.info(
+                        "Using negative cache for '%s' (type=%s)",
+                        material_name,
+                        failed_cached.get("failure_type", "unknown"),
+                    )
+                    cached_result = failed_cached.get("result")
+                    if cached_result:
+                        try:
+                            return MaterialResult.model_validate(cached_result)
+                        except ValidationError:
+                            logger.debug(
+                                "Failed to reconstruct cached failure result for '%s'", material_name
+                            )
+                    return self._negative_cache_result(
+                        material_name,
+                        failed_cached.get("reason") or "Поиск завершился ошибкой",
+                    )
+
                 cached = self.cache.get_material(material_name)
                 if cached:
                     logger.info("Using cached result for '%s'", material_name)
@@ -490,7 +516,7 @@ class ConstructionAIAgent:
         result = self._attach_local_suggestions(result, material_name, match_exact)
 
         # Сохранение в кэш
-        if use_cache and result.best_offer.best_supplier != "N/A":
+        if use_cache:
             self._cache_material_result(material_name, result)
 
         return result
@@ -573,6 +599,25 @@ class ConstructionAIAgent:
                 price="N/A",
                 url="N/A",
                 reasoning=f"⏱ Поиск остановлен: превышен лимит {timeout_seconds:.0f} сек.",
+            ),
+        )
+
+    def _negative_cache_result(self, material_name: str, reason: str) -> MaterialResult:
+        """Сформировать результат из негативного кэша."""
+        analysis = MaterialQueryAnalysis(
+            pt_name=material_name,
+            search_queries=[],
+            key_specs=[],
+        )
+        return MaterialResult(
+            material_name=material_name,
+            analysis=analysis,
+            quotes=[],
+            best_offer=BestOffer(
+                best_supplier="N/A",
+                price="N/A",
+                url="N/A",
+                reasoning=reason,
             ),
         )
 
@@ -1306,6 +1351,30 @@ class ConstructionAIAgent:
     
     def _cache_material_result(self, material_name: str, result: MaterialResult):
         """Сохранить результат в кэш."""
+        if result.best_offer.best_supplier == "N/A":
+            reason = result.best_offer.reasoning or "Поиск не дал результатов"
+            reason_lower = reason.lower()
+            is_timeout = (
+                "превышен лимит" in reason_lower
+                or "timeout" in reason_lower
+                or "time limit" in reason_lower
+                or "⏱" in reason
+            )
+            failure_type = "timeout" if is_timeout else "no_results"
+            ttl_seconds = (
+                self.config.timeout_cache_ttl_seconds
+                if failure_type == "timeout"
+                else self.config.failure_cache_ttl_seconds
+            )
+            self.cache.set_failed_material(
+                material_name=material_name,
+                reason=reason,
+                failure_type=failure_type,
+                ttl_seconds=ttl_seconds,
+                result=result.model_dump(),
+            )
+            return
+
         self.cache.set_material(
             material_name=material_name,
             pt_name=result.analysis.pt_name,
@@ -1317,6 +1386,7 @@ class ConstructionAIAgent:
             reasoning=result.best_offer.reasoning,
             suppliers=[q.model_dump() for q in result.quotes],
         )
+        self.cache.clear_failed_material(material_name)
     
     def _convert_advanced_result(self, advanced_result: "MaterialSearchResult") -> MaterialResult:
         """Конвертировать результат продвинутого агента в стандартный формат."""
