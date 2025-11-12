@@ -12,11 +12,13 @@
 
 from __future__ import annotations
 
+import atexit
 import importlib
 import json
 import logging
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence
@@ -155,6 +157,7 @@ class ConstructionAIAgentConfig:
     # Cache
     cache_db_path: str = "./cache/materials.db"
     cache_ttl_seconds: int = 86400
+    cache_cleanup_interval: float = 3600.0
     
     # Material search
     request_delay_seconds: float = 1.0
@@ -224,6 +227,7 @@ class ConstructionAIAgentConfig:
             google_worksheet_name=os.getenv("GOOGLE_SHEET_WORKSHEET", "Sheet1"),
             cache_db_path=os.getenv("CACHE_DB_PATH", "./cache/materials.db"),
             cache_ttl_seconds=int(os.getenv("CACHE_TTL_SECONDS", "86400")),
+            cache_cleanup_interval=float(os.getenv("CACHE_CLEANUP_INTERVAL_SECONDS", "3600")),
             request_delay_seconds=float(os.getenv("REQUEST_DELAY_SECONDS", "1.0")),
             enable_known_sites=os.getenv("ENABLE_KNOWN_SITE_SEARCH", "true").lower() == "true",
             known_sites_only=os.getenv("KNOWN_SITE_SEARCH_ONLY", "false").lower() == "true",
@@ -312,6 +316,12 @@ class ConstructionAIAgent:
             db_path=Path(self.config.cache_db_path),
             cache_ttl_seconds=self.config.cache_ttl_seconds,
         )
+        self.cache.clear_expired()
+
+        self._cache_cleanup_stop_event = threading.Event()
+        self._cache_cleanup_thread: Optional[threading.Thread] = None
+        self._start_cache_cleanup_task()
+        atexit.register(self.close)
         
         # Инициализация Google Sheets AI (если настроен)
         self.sheets_ai = None
@@ -445,9 +455,43 @@ class ConstructionAIAgent:
                 logger.warning("Failed to initialize project chat agent: %s", exc)
         else:
             logger.info("Project chat agent is disabled")
-    
+
         logger.info("ConstructionAIAgent initialized successfully")
-    
+
+    def _start_cache_cleanup_task(self) -> None:
+        """Запустить фоновую задачу очистки кэша."""
+        interval = getattr(self.config, "cache_cleanup_interval", None)
+        if not interval or interval <= 0:
+            return
+
+        if self._cache_cleanup_thread is not None:
+            return
+
+        def _cleanup_loop() -> None:
+            while not self._cache_cleanup_stop_event.wait(interval):
+                try:
+                    self.cache.clear_expired()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Cache cleanup task failed: %s", exc)
+
+        self._cache_cleanup_thread = threading.Thread(
+            target=_cleanup_loop,
+            name="ConstructionAIAgentCacheCleanup",
+            daemon=True,
+        )
+        self._cache_cleanup_thread.start()
+
+    def close(self) -> None:
+        """Остановить фоновые задачи агента."""
+        stop_event = getattr(self, "_cache_cleanup_stop_event", None)
+        if stop_event and not stop_event.is_set():
+            stop_event.set()
+
+        thread = getattr(self, "_cache_cleanup_thread", None)
+        if thread and thread.is_alive():
+            thread.join(timeout=1.0)
+        self._cache_cleanup_thread = None
+
     # ========================================================================
     # МАТЕРИАЛЫ: Поиск цен на строительные материалы
     # ========================================================================
