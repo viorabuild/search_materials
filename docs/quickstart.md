@@ -19,7 +19,7 @@ pip install -r requirements.txt
    cp .env.example .env
    ```
 2. Заполните как минимум:
-   - `OPENAI_API_KEY`
+   - `OPENAI_API_KEY` **или** установите `ENABLE_LOCAL_LLM=true` и задайте `LOCAL_LLM_BASE_URL` + `LOCAL_LLM_MODEL`
    - `GOOGLE_SERVICE_ACCOUNT_FILE` → путь к `credentials/service-account.json` (или используйте `GOOGLE_SERVICE_ACCOUNT_JSON`)
    - `GOOGLE_SHEET_ID` и `GOOGLE_SHEET_WORKSHEET`, если планируете работу с таблицами
 3. Проверьте дополнительные параметры:
@@ -32,6 +32,15 @@ pip install -r requirements.txt
    - `CACHE_DB_PATH` — путь к SQLite-кэшу (создаётся автоматически)
 
 > ⚠️ Если вы используете Google Sheets для базы материалов, поделитесь таблицей с сервисным аккаунтом (email из `credentials/service-account.json`) и выдайте права на редактирование.
+
+### Проверка конфигурации
+`ConstructionAIAgent` вызывает `ConstructionAIAgentConfig.validate()` во время запуска и сразу сообщает об отсутствующих параметрах. Наиболее частые сообщения:
+- `OPENAI_API_KEY is required unless ENABLE_LOCAL_LLM=true` — нужно указать ключ OpenAI или включить локальную LLM.
+- `Google Sheets integration requires GOOGLE_SERVICE_ACCOUNT_PATH or GOOGLE_SERVICE_ACCOUNT_JSON` — заданы Google Sheets, но не найден сервисный аккаунт.
+- `Local materials CSV not found at ...` — включена локальная база материалов, но CSV отсутствует.
+- `Materials DB assistant requires LOCAL_MATERIALS_CSV_PATH or MATERIALS_DB_SHEET_ID` — помощнику базы требуется CSV или Google Sheet.
+
+Исправьте настройки `.env` или отключите связанные функции, чтобы продолжить инициализацию.
 
 ## 4. Размещение секретов
 - Поместите сервисный аккаунт Google в `credentials/service-account.json`
