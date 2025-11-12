@@ -12,12 +12,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 import logging
 import os
 import sys
 import time
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence
 from dataclasses import dataclass
@@ -431,12 +433,20 @@ class ConstructionAIAgent:
             else self.default_timeout_seconds
         )
         deadline = time.time() + timeout if timeout else None
-        analysis: Optional[MaterialQueryAnalysis] = None
+        analysis_holder: List[Optional[MaterialQueryAnalysis]] = [None]
         match_exact = (
             exact_match_only
             if exact_match_only is not None
             else self.config.exact_match_only_default
         )
+
+        cancel_event = threading.Event()
+        prev_material_event = getattr(self.material_agent, "_search_cancel_event", None)
+        setattr(self.material_agent, "_search_cancel_event", cancel_event)
+        prev_advanced_event = None
+        if self.advanced_agent is not None:
+            prev_advanced_event = getattr(self.advanced_agent, "_search_cancel_event", None)
+            setattr(self.advanced_agent, "_search_cancel_event", cancel_event)
 
         try:
             # Проверка кэша
@@ -448,52 +458,212 @@ class ConstructionAIAgent:
 
             if deadline and time.time() >= deadline:
                 raise SearchTimeoutError(f"Time limit exceeded before starting search for '{material_name}'")
-        
-            # Продвинутый поиск через LangChain
-            if use_advanced_search and self.advanced_agent:
-                logger.info("Using advanced agent for '%s'", material_name)
-                if deadline and time.time() >= deadline:
-                    raise SearchTimeoutError(
-                        f"Time limit exceeded before advanced search for '{material_name}'"
-                    )
-                advanced_result = self.advanced_agent.find_best_price(material_name)
-                if deadline and time.time() >= deadline:
-                    raise SearchTimeoutError(
-                        f"Time limit exceeded after advanced search for '{material_name}'"
-                    )
-                result = self._convert_advanced_result(advanced_result)
-            else:
-                # Обычный поиск
-                if deadline and time.time() >= deadline:
-                    raise SearchTimeoutError(
-                        f"Time limit exceeded before analysis for '{material_name}'"
-                    )
-                analysis = self.material_agent.analyze_material(material_name)
-                if deadline and time.time() >= deadline:
-                    raise SearchTimeoutError(
-                        f"Time limit exceeded after analysis for '{material_name}'"
-                    )
-                result = self.material_agent._resolve_material(
-                    material_name,
-                    analysis,
-                    use_scraping,
-                    self.config.enable_known_sites,
-                    self.config.known_sites_only,
-                    use_real_scraping=self.config.enable_real_scraping,
-                    use_gpt_scraping=self.config.enable_gpt_scraping,
+
+            result = asyncio.run(
+                self._find_material_price_async(
+                    material_name=material_name,
+                    use_scraping=use_scraping,
+                    use_advanced_search=use_advanced_search,
                     deadline=deadline,
+                    cancel_event=cancel_event,
+                    analysis_holder=analysis_holder,
                 )
+            )
         except SearchTimeoutError as exc:
             logger.warning("Search for '%s' stopped due to time limit: %s", material_name, exc)
-            result = self._timeout_material_result(material_name, analysis, timeout)
+            result = self._timeout_material_result(material_name, analysis_holder[0], timeout)
+        finally:
+            if prev_material_event is None:
+                try:
+                    delattr(self.material_agent, "_search_cancel_event")
+                except AttributeError:
+                    pass
+            else:
+                setattr(self.material_agent, "_search_cancel_event", prev_material_event)
+
+            if self.advanced_agent is not None:
+                if prev_advanced_event is None:
+                    try:
+                        delattr(self.advanced_agent, "_search_cancel_event")
+                    except AttributeError:
+                        pass
+                else:
+                    setattr(self.advanced_agent, "_search_cancel_event", prev_advanced_event)
 
         result = self._attach_local_suggestions(result, material_name, match_exact)
 
         # Сохранение в кэш
-        if use_cache and result.best_offer.best_supplier != "N/A":
+        if (
+            use_cache
+            and result.analysis is not None
+            and result.best_offer.best_supplier != "N/A"
+        ):
             self._cache_material_result(material_name, result)
 
         return result
+
+    async def _find_material_price_async(
+        self,
+        material_name: str,
+        use_scraping: bool,
+        use_advanced_search: bool,
+        deadline: Optional[float],
+        cancel_event: threading.Event,
+        analysis_holder: List[Optional[MaterialQueryAnalysis]],
+    ) -> MaterialResult:
+        loop = asyncio.get_running_loop()
+        tasks: List[asyncio.Future] = []
+
+        material_task = loop.run_in_executor(
+            None,
+            self._material_search_sync,
+            material_name,
+            use_scraping,
+            deadline,
+            cancel_event,
+            analysis_holder,
+        )
+        tasks.append(material_task)
+
+        if use_advanced_search and self.advanced_agent is not None:
+            logger.info("Using advanced agent for '%s'", material_name)
+            advanced_task = loop.run_in_executor(
+                None,
+                self._advanced_search_sync,
+                material_name,
+                deadline,
+                cancel_event,
+            )
+            tasks.append(advanced_task)
+
+        return await self._await_first_result(tasks, deadline, cancel_event)
+
+    async def _await_first_result(
+        self,
+        tasks: List[asyncio.Future],
+        deadline: Optional[float],
+        cancel_event: threading.Event,
+    ) -> MaterialResult:
+        pending: set[asyncio.Future] = set(tasks)
+        last_error: Optional[BaseException] = None
+
+        while pending:
+            timeout: Optional[float] = None
+            if deadline is not None:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    cancel_event.set()
+                    await self._cancel_pending(pending)
+                    raise SearchTimeoutError("Time limit exceeded during material search")
+                timeout = max(0.0, remaining)
+
+            done, pending = await asyncio.wait(
+                pending,
+                timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            if not done:
+                cancel_event.set()
+                await self._cancel_pending(pending)
+                raise SearchTimeoutError("Time limit exceeded during material search")
+
+            for task in done:
+                try:
+                    result = task.result()
+                except asyncio.CancelledError:
+                    continue
+                except SearchTimeoutError as exc:
+                    last_error = exc
+                except Exception as exc:  # noqa: BLE001
+                    last_error = exc
+                    logger.exception("Material search task failed: %s", exc)
+                else:
+                    cancel_event.set()
+                    await self._cancel_pending(pending)
+                    return result
+
+        cancel_event.set()
+        if last_error is not None:
+            raise last_error
+        raise SearchTimeoutError("No material search tasks completed successfully")
+
+    async def _cancel_pending(self, pending: set[asyncio.Future]) -> None:
+        if not pending:
+            return
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    def _material_search_sync(
+        self,
+        material_name: str,
+        use_scraping: bool,
+        deadline: Optional[float],
+        cancel_event: threading.Event,
+        analysis_holder: List[Optional[MaterialQueryAnalysis]],
+    ) -> MaterialResult:
+        if cancel_event.is_set():
+            raise SearchTimeoutError("Material search cancelled")
+
+        if deadline and time.time() >= deadline:
+            raise SearchTimeoutError(
+                f"Time limit exceeded before analysis for '{material_name}'"
+            )
+
+        analysis = self.material_agent.analyze_material(material_name)
+        analysis_holder[0] = analysis
+
+        if cancel_event.is_set():
+            raise SearchTimeoutError("Material search cancelled")
+
+        if deadline and time.time() >= deadline:
+            raise SearchTimeoutError(
+                f"Time limit exceeded after analysis for '{material_name}'"
+            )
+
+        result = self.material_agent._resolve_material(
+            material_name,
+            analysis,
+            use_scraping,
+            self.config.enable_known_sites,
+            self.config.known_sites_only,
+            use_real_scraping=self.config.enable_real_scraping,
+            use_gpt_scraping=self.config.enable_gpt_scraping,
+            deadline=deadline,
+        )
+
+        if cancel_event.is_set():
+            raise SearchTimeoutError("Material search cancelled")
+
+        return result
+
+    def _advanced_search_sync(
+        self,
+        material_name: str,
+        deadline: Optional[float],
+        cancel_event: threading.Event,
+    ) -> MaterialResult:
+        if cancel_event.is_set():
+            raise SearchTimeoutError("Advanced search cancelled")
+
+        if deadline and time.time() >= deadline:
+            raise SearchTimeoutError(
+                f"Time limit exceeded before advanced search for '{material_name}'"
+            )
+
+        advanced_result = self.advanced_agent.find_best_price(material_name)
+
+        if cancel_event.is_set():
+            raise SearchTimeoutError("Advanced search cancelled")
+
+        if deadline and time.time() >= deadline:
+            raise SearchTimeoutError(
+                f"Time limit exceeded after advanced search for '{material_name}'"
+            )
+
+        return self._convert_advanced_result(advanced_result)
     
     def find_materials_batch(
         self,
@@ -582,7 +752,12 @@ class ConstructionAIAgent:
         query: str,
         exact_match_only: bool,
     ) -> MaterialResult:
-        if not self.local_materials_db or not self.local_materials_db.available:
+        if (
+            not result
+            or result.analysis is None
+            or not self.local_materials_db
+            or not self.local_materials_db.available
+        ):
             return result
 
         suggestions = self.local_materials_db.search(
@@ -1306,6 +1481,9 @@ class ConstructionAIAgent:
     
     def _cache_material_result(self, material_name: str, result: MaterialResult):
         """Сохранить результат в кэш."""
+        if not result.analysis:
+            logger.debug("Skipping cache for '%s' because analysis is missing", material_name)
+            return
         self.cache.set_material(
             material_name=material_name,
             pt_name=result.analysis.pt_name,
