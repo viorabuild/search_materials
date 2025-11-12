@@ -26,6 +26,11 @@ import gspread
 from dotenv import load_dotenv
 from llm_provider import FallbackOpenAI, LLMFallbackConfig
 
+try:  # pragma: no cover - executed only when dependency is available
+    from prometheus_client import Counter, Histogram, start_http_server
+except ImportError:  # pragma: no cover - fallback for offline environments
+    from observability_fallback import Counter, Histogram, start_http_server
+
 # Импорты из существующих модулей
 from material_price_agent import (
     MaterialPriceAgent,
@@ -53,6 +58,75 @@ if TYPE_CHECKING:
 
 load_dotenv()
 logger = logging.getLogger(__name__)
+
+
+MATERIAL_SEARCH_REQUESTS = Counter(
+    "construction_material_search_requests_total",
+    "Total number of material price searches.",
+)
+MATERIAL_SEARCH_DURATION = Histogram(
+    "construction_material_search_duration_seconds",
+    "Duration of material price search operations in seconds.",
+)
+MATERIAL_CACHE_HITS = Counter(
+    "construction_material_cache_hits_total",
+    "Number of material price cache hits.",
+)
+MATERIAL_CACHE_MISSES = Counter(
+    "construction_material_cache_misses_total",
+    "Number of material price cache misses.",
+)
+SHEETS_COMMAND_REQUESTS = Counter(
+    "construction_sheets_commands_total",
+    "Total number of Google Sheets AI commands processed.",
+)
+SHEETS_COMMAND_DURATION = Histogram(
+    "construction_sheets_command_duration_seconds",
+    "Duration of Google Sheets AI command processing in seconds.",
+)
+ESTIMATE_CHECK_REQUESTS = Counter(
+    "construction_estimate_checks_total",
+    "Total number of estimate checks performed.",
+)
+ESTIMATE_CHECK_DURATION = Histogram(
+    "construction_estimate_check_duration_seconds",
+    "Duration of estimate check operations in seconds.",
+)
+LLM_REQUESTS = Counter(
+    "construction_llm_requests_total",
+    "Total number of logical requests sent to an LLM backend.",
+)
+
+_METRICS_SERVER_STARTED = False
+
+
+def _start_metrics_server() -> None:
+    """Start the Prometheus metrics HTTP exporter if it is not running yet."""
+
+    global _METRICS_SERVER_STARTED
+    if _METRICS_SERVER_STARTED:
+        return
+
+    port = int(os.getenv("METRICS_PORT", "9000"))
+    start_http_server(port)
+    _METRICS_SERVER_STARTED = True
+    logger.info("Prometheus metrics exporter started on port %s", port)
+
+
+def _instrument_openai_client(client: FallbackOpenAI) -> None:
+    """Wrap the fallback OpenAI client to count logical LLM requests."""
+
+    if getattr(client, "_metrics_wrapped", False):
+        return
+
+    original_call = client._call_with_fallback
+
+    def _wrapped_call(*args: Any, **kwargs: Any):  # type: ignore[override]
+        LLM_REQUESTS.inc()
+        return original_call(*args, **kwargs)
+
+    client._call_with_fallback = _wrapped_call  # type: ignore[attr-defined]
+    client._metrics_wrapped = True
 
 
 def _normalize_query(value: Optional[str]) -> str:
@@ -218,6 +292,8 @@ class ConstructionAIAgent:
         )
 
         self.openai_client = FallbackOpenAI(fallback_config)
+        _start_metrics_server()
+        _instrument_openai_client(self.openai_client)
         
         # Инициализация базового агента для поиска материалов
         self.material_agent = MaterialPriceAgent(
@@ -424,76 +500,86 @@ class ConstructionAIAgent:
         Returns:
             MaterialResult с информацией о лучшем предложении
         """
-        logger.info("Searching for material: %s", material_name)
-        timeout = (
-            timeout_seconds
-            if timeout_seconds is not None
-            else self.default_timeout_seconds
-        )
-        deadline = time.time() + timeout if timeout else None
-        analysis: Optional[MaterialQueryAnalysis] = None
-        match_exact = (
-            exact_match_only
-            if exact_match_only is not None
-            else self.config.exact_match_only_default
-        )
+        MATERIAL_SEARCH_REQUESTS.inc()
+        with MATERIAL_SEARCH_DURATION.time():
+            logger.info("Searching for material: %s", material_name)
+            timeout = (
+                timeout_seconds
+                if timeout_seconds is not None
+                else self.default_timeout_seconds
+            )
+            deadline = time.time() + timeout if timeout else None
+            analysis: Optional[MaterialQueryAnalysis] = None
+            match_exact = (
+                exact_match_only
+                if exact_match_only is not None
+                else self.config.exact_match_only_default
+            )
 
-        try:
-            # Проверка кэша
-            if use_cache:
-                cached = self.cache.get_material(material_name)
-                if cached:
-                    logger.info("Using cached result for '%s'", material_name)
-                    return self._reconstruct_material_result(material_name, cached)
+            try:
+                cache_checked = False
+                # Проверка кэша
+                if use_cache:
+                    cache_checked = True
+                    cached = self.cache.get_material(material_name)
+                    if cached:
+                        MATERIAL_CACHE_HITS.inc()
+                        logger.info("Using cached result for '%s'", material_name)
+                        return self._reconstruct_material_result(material_name, cached)
 
-            if deadline and time.time() >= deadline:
-                raise SearchTimeoutError(f"Time limit exceeded before starting search for '{material_name}'")
-        
-            # Продвинутый поиск через LangChain
-            if use_advanced_search and self.advanced_agent:
-                logger.info("Using advanced agent for '%s'", material_name)
+                if cache_checked:
+                    MATERIAL_CACHE_MISSES.inc()
+
                 if deadline and time.time() >= deadline:
                     raise SearchTimeoutError(
-                        f"Time limit exceeded before advanced search for '{material_name}'"
+                        f"Time limit exceeded before starting search for '{material_name}'"
                     )
-                advanced_result = self.advanced_agent.find_best_price(material_name)
-                if deadline and time.time() >= deadline:
-                    raise SearchTimeoutError(
-                        f"Time limit exceeded after advanced search for '{material_name}'"
-                    )
-                result = self._convert_advanced_result(advanced_result)
-            else:
-                # Обычный поиск
-                if deadline and time.time() >= deadline:
-                    raise SearchTimeoutError(
-                        f"Time limit exceeded before analysis for '{material_name}'"
-                    )
-                analysis = self.material_agent.analyze_material(material_name)
-                if deadline and time.time() >= deadline:
-                    raise SearchTimeoutError(
-                        f"Time limit exceeded after analysis for '{material_name}'"
-                    )
-                result = self.material_agent._resolve_material(
-                    material_name,
-                    analysis,
-                    use_scraping,
-                    self.config.enable_known_sites,
-                    self.config.known_sites_only,
-                    use_real_scraping=self.config.enable_real_scraping,
-                    use_gpt_scraping=self.config.enable_gpt_scraping,
-                    deadline=deadline,
-                )
-        except SearchTimeoutError as exc:
-            logger.warning("Search for '%s' stopped due to time limit: %s", material_name, exc)
-            result = self._timeout_material_result(material_name, analysis, timeout)
 
-        result = self._attach_local_suggestions(result, material_name, match_exact)
+                # Продвинутый поиск через LangChain
+                if use_advanced_search and self.advanced_agent:
+                    logger.info("Using advanced agent for '%s'", material_name)
+                    if deadline and time.time() >= deadline:
+                        raise SearchTimeoutError(
+                            f"Time limit exceeded before advanced search for '{material_name}'"
+                        )
+                    advanced_result = self.advanced_agent.find_best_price(material_name)
+                    if deadline and time.time() >= deadline:
+                        raise SearchTimeoutError(
+                            f"Time limit exceeded after advanced search for '{material_name}'"
+                        )
+                    result = self._convert_advanced_result(advanced_result)
+                else:
+                    # Обычный поиск
+                    if deadline and time.time() >= deadline:
+                        raise SearchTimeoutError(
+                            f"Time limit exceeded before analysis for '{material_name}'"
+                        )
+                    analysis = self.material_agent.analyze_material(material_name)
+                    if deadline and time.time() >= deadline:
+                        raise SearchTimeoutError(
+                            f"Time limit exceeded after analysis for '{material_name}'"
+                        )
+                    result = self.material_agent._resolve_material(
+                        material_name,
+                        analysis,
+                        use_scraping,
+                        self.config.enable_known_sites,
+                        self.config.known_sites_only,
+                        use_real_scraping=self.config.enable_real_scraping,
+                        use_gpt_scraping=self.config.enable_gpt_scraping,
+                        deadline=deadline,
+                    )
+            except SearchTimeoutError as exc:
+                logger.warning("Search for '%s' stopped due to time limit: %s", material_name, exc)
+                result = self._timeout_material_result(material_name, analysis, timeout)
 
-        # Сохранение в кэш
-        if use_cache and result.best_offer.best_supplier != "N/A":
-            self._cache_material_result(material_name, result)
+            result = self._attach_local_suggestions(result, material_name, match_exact)
 
-        return result
+            # Сохранение в кэш
+            if use_cache and result.best_offer.best_supplier != "N/A":
+                self._cache_material_result(material_name, result)
+
+            return result
     
     def find_materials_batch(
         self,
@@ -685,17 +771,19 @@ class ConstructionAIAgent:
     def process_sheets_command(self, command: str) -> str:
         """
         Обработать команду для работы с Google Sheets.
-        
+
         Args:
             command: Команда на естественном языке
-        
+
         Returns:
             Результат выполнения команды
         """
-        if not self.sheets_ai:
-            return "❌ Google Sheets AI not initialized. Set GOOGLE_SHEET_ID in .env"
-        
-        return self.sheets_ai.process_command(command)
+        SHEETS_COMMAND_REQUESTS.inc()
+        with SHEETS_COMMAND_DURATION.time():
+            if not self.sheets_ai:
+                return "❌ Google Sheets AI not initialized. Set GOOGLE_SHEET_ID in .env"
+
+            return self.sheets_ai.process_command(command)
     
     def read_sheet_data(self, worksheet_name: Optional[str] = None) -> List[List[str]]:
         """Прочитать данные из Google Sheets."""
@@ -805,28 +893,30 @@ class ConstructionAIAgent:
         Returns:
             Отчет о проверке
         """
-        if not self.sheets_ai or not self.sheets_ai.estimate_checker:
-            return "❌ Estimate checker not available"
-        
-        estimate_sheet = estimate_sheet or self.config.google_worksheet_name
-        
-        try:
-            estimate_worksheet = self.sheets_ai.spreadsheet.worksheet(estimate_sheet)
-            master_worksheet = self.sheets_ai.spreadsheet.worksheet(master_sheet)
-            
-            estimate_data = estimate_worksheet.get_all_values()
-            master_data = master_worksheet.get_all_values()
-            
-            result = self.sheets_ai.estimate_checker.validate_estimate(
-                estimate_data,
-                master_data,
-                quantity_col,
-            )
-            
-            return self.sheets_ai.estimate_checker.format_validation_report(result)
-        
-        except Exception as e:
-            return f"❌ Error checking estimate: {e}"
+        ESTIMATE_CHECK_REQUESTS.inc()
+        with ESTIMATE_CHECK_DURATION.time():
+            if not self.sheets_ai or not self.sheets_ai.estimate_checker:
+                return "❌ Estimate checker not available"
+
+            estimate_sheet = estimate_sheet or self.config.google_worksheet_name
+
+            try:
+                estimate_worksheet = self.sheets_ai.spreadsheet.worksheet(estimate_sheet)
+                master_worksheet = self.sheets_ai.spreadsheet.worksheet(master_sheet)
+
+                estimate_data = estimate_worksheet.get_all_values()
+                master_data = master_worksheet.get_all_values()
+
+                result = self.sheets_ai.estimate_checker.validate_estimate(
+                    estimate_data,
+                    master_data,
+                    quantity_col,
+                )
+
+                return self.sheets_ai.estimate_checker.format_validation_report(result)
+
+            except Exception as e:
+                return f"❌ Error checking estimate: {e}"
     
     # ========================================================================
     # УНИВЕРСАЛЬНЫЙ ИНТЕРФЕЙС: Обработка любых команд
