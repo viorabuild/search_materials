@@ -122,6 +122,7 @@ class MaterialsDatabaseAssistant:
             else Path("cache") / "materials_pending.json"
         )
         self._pending_expiration_seconds = pending_expiration_seconds
+        self._last_row_fetch_failed = False
 
         if self.sheet_id and gspread is None:
             logger.warning(
@@ -796,6 +797,12 @@ class MaterialsDatabaseAssistant:
         except Exception:  # noqa: BLE001
             rows = []
 
+        if self._last_row_fetch_failed:
+            logger.debug(
+                "Skipping pending cleanup because backing store could not be read."
+            )
+            return False
+
         existing: Dict[str, Dict[str, str]] = {}
         for row in rows:
             record_id = row.get("ID")
@@ -1043,12 +1050,15 @@ class MaterialsDatabaseAssistant:
         resolved_name, sheet_obj = self._resolve_sheet_object(sheet_hint)
 
         if sheet_obj is None:
+            if self.sheet_id:
+                self._last_row_fetch_failed = True
             return rows
 
         try:
             values = sheet_obj.get_all_values()
         except Exception as exc:  # noqa: BLE001
             logger.error("Failed to read worksheet '%s': %s", resolved_name, exc)
+            self._last_row_fetch_failed = True
             return rows
 
         if not values:
@@ -1118,6 +1128,7 @@ class MaterialsDatabaseAssistant:
         query: Optional[str] = None,
         worksheet: Optional[str] = None,
     ) -> List[Dict[str, str]]:
+        self._last_row_fetch_failed = False
         if worksheet:
             rows = self._read_rows_for_sheet(worksheet, limit=limit, query=query)
             if rows:
