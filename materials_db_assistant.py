@@ -5,11 +5,11 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
-from uuid import uuid4
 
 from local_materials_db import LocalMaterialDatabase
 
@@ -94,6 +94,8 @@ class MaterialsDatabaseAssistant:
         worksheet_names: Optional[Sequence[str]] = None,
         gspread_client: Optional[Any] = None,
         sync_csv: bool = True,
+        pending_cache_path: Optional[Path] = None,
+        pending_expiration_seconds: Optional[int] = 7 * 24 * 60 * 60,
     ) -> None:
         if csv_path is not None and not isinstance(csv_path, Path):
             csv_path = Path(csv_path)
@@ -114,6 +116,12 @@ class MaterialsDatabaseAssistant:
         self._spreadsheet = None
         self._sheets: Dict[str, Optional[Any]] = {}
         self._sync_csv = bool(sync_csv and self.csv_path is not None)
+        self._pending_cache_path = (
+            Path(pending_cache_path)
+            if pending_cache_path is not None
+            else Path("cache") / "materials_pending.json"
+        )
+        self._pending_expiration_seconds = pending_expiration_seconds
 
         if self.sheet_id and gspread is None:
             logger.warning(
@@ -185,7 +193,9 @@ class MaterialsDatabaseAssistant:
         self._headers: List[str] = []
         self._header_lookup: Dict[str, str] = {}
         self._pending: Dict[str, PendingChange] = {}
+        self._pending_counter: int = 0
         self._load_headers()
+        self._load_pending_state()
         if (
             any(sheet is not None for sheet in self._sheets.values())
             and self._sync_csv
@@ -265,6 +275,8 @@ class MaterialsDatabaseAssistant:
 
     def pending_count(self) -> int:
         """Return the number of staged changes."""
+        if self._cleanup_pending():
+            self._save_pending_state()
         return len(self._pending)
 
     def quick_lookup(
@@ -539,6 +551,7 @@ class MaterialsDatabaseAssistant:
             worksheet=resolved_sheet,
         )
         self._pending[change.change_id] = change
+        self._save_pending_state()
 
         summary = "\n".join(diff_lines)
         return (
@@ -582,6 +595,7 @@ class MaterialsDatabaseAssistant:
             worksheet=resolved_sheet,
         )
         self._pending[change.change_id] = change
+        self._save_pending_state()
 
         preview = self._format_record_details(new_row)
         return (
@@ -620,6 +634,7 @@ class MaterialsDatabaseAssistant:
             worksheet=resolved_sheet,
         )
         self._pending[change.change_id] = change
+        self._save_pending_state()
 
         preview = self._format_record_details(current)
         return (
@@ -655,6 +670,7 @@ class MaterialsDatabaseAssistant:
             return f"❌ Не удалось применить изменение {change_id}: {exc}"
 
         self._pending.pop(change_id, None)
+        self._save_pending_state()
         self._refresh_local_db()
         return f"✅ Изменение {change_id} применено."
 
@@ -664,9 +680,182 @@ class MaterialsDatabaseAssistant:
         if change_id not in self._pending:
             return f"ℹ️ Изменение {change_id} не найдено."
         self._pending.pop(change_id, None)
+        self._save_pending_state()
         return f"✅ Изменение {change_id} отменено."
 
+    # ------------------------------------------------------------------ #
+    # Pending persistence helpers                                       #
+    # ------------------------------------------------------------------ #
+
+    def _load_pending_state(self) -> None:
+        if not self._pending_cache_path:
+            return
+
+        data: Any = None
+        try:
+            if self._pending_cache_path.exists():
+                with self._pending_cache_path.open("r", encoding="utf-8") as handle:
+                    data = json.load(handle)
+        except Exception:  # noqa: BLE001
+            logger.debug("Failed to load pending changes cache.", exc_info=True)
+            data = None
+
+        loaded: Dict[str, PendingChange] = {}
+        saved_counter: int = 0
+        if isinstance(data, dict):
+            raw_changes = data.get("changes")
+            if isinstance(data.get("counter"), int):
+                saved_counter = max(int(data["counter"]), 0)
+        else:
+            raw_changes = data
+
+        if isinstance(raw_changes, dict):
+            iterable = raw_changes.values()
+        elif isinstance(raw_changes, list):
+            iterable = raw_changes
+        else:
+            iterable = []
+
+        for item in iterable:
+            change = self._deserialize_change(item)
+            if change is None:
+                continue
+            loaded[change.change_id] = change
+
+        self._pending = loaded
+        self._restore_pending_counter(saved_counter)
+        if self._cleanup_pending():
+            self._save_pending_state()
+
+    def _save_pending_state(self) -> None:
+        if not self._pending_cache_path:
+            return
+
+        try:
+            self._pending_cache_path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:  # noqa: BLE001
+            pass
+
+        payload = {
+            "version": 1,
+            "counter": self._pending_counter,
+            "changes": [
+                self._serialize_change(change)
+                for change in sorted(
+                    self._pending.values(), key=lambda item: item.created_at
+                )
+            ],
+        }
+
+        try:
+            with self._pending_cache_path.open("w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=2)
+        except Exception:  # noqa: BLE001
+            logger.debug("Failed to persist pending changes cache.", exc_info=True)
+
+    def _serialize_change(self, change: PendingChange) -> Dict[str, Any]:
+        return {
+            "change_id": change.change_id,
+            "action": change.action,
+            "record_id": change.record_id,
+            "fields": change.fields,
+            "reason": change.reason,
+            "before": change.before,
+            "after": change.after,
+            "worksheet": change.worksheet,
+            "created_at": change.created_at,
+        }
+
+    def _deserialize_change(self, payload: Any) -> Optional[PendingChange]:
+        if not isinstance(payload, dict):
+            return None
+        change_id = payload.get("change_id")
+        change_id = str(change_id).strip() if change_id else ""
+        action = payload.get("action")
+        action = str(action).strip() if action else ""
+        if not action:
+            return None
+
+        try:
+            change = PendingChange(
+                change_id=change_id,
+                action=action,
+                record_id=payload.get("record_id"),
+                fields=dict(payload.get("fields") or {}),
+                reason=payload.get("reason"),
+                before=dict(payload.get("before") or {}) or None,
+                after=dict(payload.get("after") or {}) or None,
+                worksheet=payload.get("worksheet"),
+                created_at=float(payload.get("created_at") or time.time()),
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("Failed to deserialize pending change: %s", payload)
+            return None
+
+        change.change_id = change.change_id or self._generate_change_id()
+        return change
+
+    def _restore_pending_counter(self, saved_counter: int) -> None:
+        self._pending_counter = max(int(saved_counter or 0), 0)
+        for change_id in self._pending:
+            extracted = self._extract_counter_suffix(change_id)
+            if extracted is not None:
+                self._pending_counter = max(self._pending_counter, extracted)
+
+    def _cleanup_pending(self) -> bool:
+        if not self._pending:
+            return False
+
+        expiration = None
+        if self._pending_expiration_seconds and self._pending_expiration_seconds > 0:
+            expiration = time.time() - self._pending_expiration_seconds
+
+        try:
+            rows = self._read_all_rows()
+        except Exception:  # noqa: BLE001
+            rows = []
+
+        existing: Dict[str, Dict[str, str]] = {}
+        for row in rows:
+            record_id = row.get("ID")
+            if record_id:
+                existing[record_id] = row
+
+        changed = False
+        for change_id, change in list(self._pending.items()):
+            if expiration is not None and change.created_at < expiration:
+                self._pending.pop(change_id, None)
+                changed = True
+                continue
+
+            record_id = change.record_id or ""
+            if change.action in {"update", "delete"}:
+                if not record_id or record_id not in existing:
+                    self._pending.pop(change_id, None)
+                    changed = True
+                    continue
+            elif change.action == "insert":
+                if record_id and record_id in existing:
+                    self._pending.pop(change_id, None)
+                    changed = True
+
+        return changed
+
+    @staticmethod
+    def _extract_counter_suffix(change_id: str) -> Optional[int]:
+        if not isinstance(change_id, str):
+            return None
+        match = re.search(r"(\d+)$", change_id)
+        if not match:
+            return None
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return None
+
     def _list_pending(self) -> str:
+        if self._cleanup_pending():
+            self._save_pending_state()
         if not self._pending:
             return "ℹ️ Нет подготовленных изменений."
 
@@ -1102,6 +1291,6 @@ class MaterialsDatabaseAssistant:
             except Exception as exc:  # noqa: BLE001
                 logger.debug("Failed to refresh local materials DB: %s", exc)
 
-    @staticmethod
-    def _generate_change_id() -> str:
-        return f"CHG-{uuid4().hex[:8].upper()}"
+    def _generate_change_id(self) -> str:
+        self._pending_counter += 1
+        return f"CHG-{self._pending_counter:04d}"

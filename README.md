@@ -35,6 +35,13 @@
    ```
    Интерфейс будет доступен по адресу http://localhost:8501.
 
+### Тестирование
+После установки зависимостей вы можете запустить автоматические проверки:
+```bash
+pytest
+```
+Это гарантирует, что ключевые компоненты (агенты, кэш и интеграции с Google Sheets) работают корректно.
+
 ### CLI или Python API
 ```bash
 python unified_agent.py --interactive
@@ -64,6 +71,33 @@ print(result)
 Если вы подключаете Google Sheets, обязательно предоставьте сервисному аккаунту права на редактирование таблицы (через «Поделиться» → email из `credentials/service-account.json`).
 
 Полный список параметров см. в [`docs/quickstart.md`](docs/quickstart.md).
+
+## Мониторинг и метрики
+Агент автоматически поднимает HTTP-эндпоинт с метриками Prometheus после создания экземпляра `ConstructionAIAgent`.
+
+- Порт по умолчанию — `9000`. Его можно переопределить переменной окружения `METRICS_PORT`.
+- Метрики доступны по адресу `http://localhost:<порт>/`.
+- Библиотека `prometheus_client` собирает данные в формате Prometheus text exposition; их можно забирать напрямую или через Prometheus/Grafana.
+
+Отслеживаются ключевые показатели:
+
+| Метрика | Назначение |
+|---------|------------|
+| `construction_material_search_requests_total` | Количество вызовов `find_material_price`. |
+| `construction_material_search_duration_seconds` | Гистограмма времени поиска цен. |
+| `construction_material_cache_hits_total` / `construction_material_cache_misses_total` | Попадания и промахи кэша цен. |
+| `construction_llm_requests_total` | Количество логических запросов к LLM (с учётом fallback). |
+| `construction_sheets_commands_total` / `construction_sheets_command_duration_seconds` | Число и длительность команд Google Sheets AI. |
+| `construction_estimate_checks_total` / `construction_estimate_check_duration_seconds` | Число и длительность проверок смет. |
+
+Пример локального запуска с альтернативным портом:
+
+```bash
+METRICS_PORT=9200 python unified_examples.py
+# Откройте http://localhost:9200/ чтобы посмотреть метрики.
+```
+
+> ℹ️ В изолированных окружениях без доступа к PyPI используется встроенный упрощённый экспортёр метрик, совместимый по API с `prometheus_client`.
 
 ## Структура проекта
 ```
