@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import atexit
 import importlib
 import json
@@ -20,6 +21,7 @@ import os
 import sys
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from threading import Lock
@@ -44,6 +46,7 @@ from material_price_agent import (
     SupplierQuote,
     SearchTimeoutError,
 )
+from estimate_constructor import EstimateConstructor, EstimateItem, ItemType
 from cache_manager import CacheManager
 from markdown_ai import GoogleSheetsAI
 from local_materials_db import LocalMaterialDatabase
@@ -190,6 +193,8 @@ class ConstructionAIAgentConfig:
     project_chat_context_files: Optional[str] = None
     project_chat_system_prompt: Optional[str] = None
     project_chat_max_history_turns: int = 6
+    enable_estimate_constructor: bool = True
+    estimate_storage_path: str = "./data/estimates"
     
     @classmethod
     def from_env(cls) -> ConstructionAIAgentConfig:
@@ -212,6 +217,9 @@ class ConstructionAIAgentConfig:
             local_llm_base_url = "http://127.0.0.1:1234"
         local_llm_model = os.getenv("LOCAL_LLM_MODEL") or "qwen/qwen3-vl-4b"
         local_llm_api_key = os.getenv("LOCAL_LLM_API_KEY") or "lm-studio"
+
+        enable_estimate_constructor = os.getenv("ENABLE_ESTIMATE_CONSTRUCTOR", "true").lower() == "true"
+        estimate_storage_path = os.getenv("ESTIMATE_STORAGE_PATH", "./data/estimates")
 
         request_timeout_env = os.getenv("LLM_REQUEST_TIMEOUT_SECONDS")
         llm_request_timeout = float(request_timeout_env) if request_timeout_env else None
@@ -260,6 +268,8 @@ class ConstructionAIAgentConfig:
             project_chat_context_files=os.getenv("PROJECT_CHAT_CONTEXT_FILES"),
             project_chat_system_prompt=os.getenv("PROJECT_CHAT_SYSTEM_PROMPT"),
             project_chat_max_history_turns=int(os.getenv("PROJECT_CHAT_MAX_HISTORY_TURNS", "6")),
+            enable_estimate_constructor=enable_estimate_constructor,
+            estimate_storage_path=estimate_storage_path,
         )
 
 
@@ -321,6 +331,20 @@ class ConstructionAIAgent:
             enable_known_sites=self.config.enable_known_sites,
             known_sites_only=self.config.known_sites_only,
         )
+
+        self.estimate_constructor: Optional[EstimateConstructor] = None
+        if self.config.enable_estimate_constructor:
+            try:
+                storage_path = Path(self.config.estimate_storage_path)
+                self.estimate_constructor = EstimateConstructor(
+                    llm_client=self.openai_client,
+                    llm_model=self.config.llm_model,
+                    material_agent=self.material_agent,
+                    storage_path=storage_path,
+                )
+                logger.info("Estimate Constructor initialized (storage=%s)", storage_path)
+            except Exception as exc:
+                logger.warning("Failed to initialize Estimate Constructor: %s", exc)
         
         # Инициализация кэш-менеджера
         self.cache = CacheManager(
