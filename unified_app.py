@@ -414,6 +414,45 @@ def check_estimate():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/estimate/setup-constructor', methods=['POST'])
+def setup_estimate_constructor():
+    """Настроить лист конструктора сметы в Google Sheets.
+
+    Body (optional):
+    {
+        "db_worksheet": "DB_Works",
+        "calc_worksheet": "Estimate_Calculator"
+    }
+    """
+    if not agent:
+        return jsonify({'error': 'Agent not initialized'}), 500
+
+    try:
+        data = request.get_json(silent=True) or {}
+        db_worksheet = data.get('db_worksheet', 'DB_Works')
+        calc_worksheet = data.get('calc_worksheet', 'Estimate_Calculator')
+
+        logger.info(
+            "Setting up estimate constructor (db=%s, calc=%s)",
+            db_worksheet,
+            calc_worksheet,
+        )
+        message = agent.setup_estimate_constructor(
+            db_worksheet_name=db_worksheet,
+            calc_sheet_name=calc_worksheet,
+        )
+
+        return jsonify({
+            'success': True,
+            'message': message,
+            'timestamp': datetime.now().isoformat(),
+        })
+
+    except Exception as e:
+        logger.error("Error setting up estimate constructor: %s", e)
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/web/search', methods=['POST'])
 def web_search():
     """

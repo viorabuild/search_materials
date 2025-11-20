@@ -757,6 +757,102 @@ class GoogleSheetsAI:
             )
         return info
 
+    def setup_estimate_constructor(
+        self,
+        db_worksheet_name: str = "DB_Works",
+        calc_sheet_name: str = "Estimate_Calculator",
+        max_rows: int = 100,
+    ) -> str:
+        """Настроить лист конструктора сметы на основе листа с работами."""
+        try:
+            db_sheet = self.spreadsheet.worksheet(db_worksheet_name)
+        except WorksheetNotFound:
+            raise ValueError(
+                f"Не найден лист с работами '{db_worksheet_name}'. Импортируйте данные в Google Sheets."
+            )
+
+        try:
+            calc_sheet = self.spreadsheet.worksheet(calc_sheet_name)
+            calc_sheet.clear()
+        except WorksheetNotFound:
+            calc_sheet = self.spreadsheet.add_worksheet(
+                title=calc_sheet_name,
+                rows=str(max_rows + 120),
+                cols="8",
+            )
+
+        headers = [[
+            "Category",
+            "Work Item",
+            "Description",
+            "Unit",
+            "Price (Est.)",
+            "Quantity",
+            "Total",
+            "Notes",
+        ]]
+        calc_sheet.update("A1:H1", headers)
+        try:
+            calc_sheet.freeze(rows=1)
+        except Exception:
+            # Заморозка строки необязательна для работы конструктора
+            pass
+
+        rows: List[List[str]] = []
+        for i in range(2, max_rows + 2):
+            row_index = i
+            row = [""] * 8
+            row[0] = (
+                f"=IFERROR(INDEX({db_worksheet_name}!A:A, MATCH(B{row_index}, "
+                f"{db_worksheet_name}!B:B, 0)), \"\")"
+            )
+            row[2] = (
+                f"=IFERROR(INDEX({db_worksheet_name}!E:E, MATCH(B{row_index}, "
+                f"{db_worksheet_name}!B:B, 0)), \"\")"
+            )
+            row[3] = (
+                f"=IFERROR(INDEX({db_worksheet_name}!C:C, MATCH(B{row_index}, "
+                f"{db_worksheet_name}!B:B, 0)), \"\")"
+            )
+            row[4] = (
+                f"=IFERROR(INDEX({db_worksheet_name}!D:D, MATCH(B{row_index}, "
+                f"{db_worksheet_name}!B:B, 0)), \"\")"
+            )
+            row[6] = (
+                f"=IF(AND(ISNUMBER(E{row_index}), ISNUMBER(F{row_index})), "
+                f"E{row_index} * F{row_index}, 0)"
+            )
+            rows.append(row)
+
+        calc_sheet.update(f"A2:H{max_rows + 1}", rows)
+
+        summary_start = max_rows + 2
+        calc_sheet.update(
+            f"A{summary_start}:B{summary_start}",
+            [["SUMMARY", ""]],
+        )
+        calc_sheet.update(
+            f"A{summary_start + 1}:B{summary_start + 1}",
+            [["Subtotal", f"=SUM(G2:G{max_rows + 1})"]],
+        )
+        calc_sheet.update(
+            f"A{summary_start + 2}:B{summary_start + 2}",
+            [["Discount (%)", "0"]],
+        )
+        calc_sheet.update(
+            f"A{summary_start + 3}:B{summary_start + 3}",
+            [["Discount Amount", f"=B{summary_start + 1} * B{summary_start + 2} / 100"]],
+        )
+        calc_sheet.update(
+            f"A{summary_start + 4}:B{summary_start + 4}",
+            [["Total After Discount", f"=B{summary_start + 1} - B{summary_start + 3}"]],
+        )
+
+        return (
+            f"Лист '{calc_sheet_name}' настроен на основе '{db_worksheet_name}'. "
+            "Откройте его в Google Sheets, чтобы использовать конструктор сметы."
+        )
+
     def process_command(self, command: str, *, reset: bool = False) -> str:
         """Обработка команды через OpenAI для выполнения действий с таблицей.
 

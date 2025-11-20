@@ -1007,6 +1007,19 @@ class ConstructionAIAgent:
             raise RuntimeError("Google Sheets AI not initialized")
         return self.sheets_ai.get_table_info(worksheet_name)
     
+    def setup_estimate_constructor(
+        self,
+        db_worksheet_name: str = "DB_Works",
+        calc_sheet_name: str = "Estimate_Calculator",
+    ) -> str:
+        """Настроить лист конструктора сметы в Google Sheets."""
+        if not self.sheets_ai:
+            raise RuntimeError("Google Sheets AI not initialized")
+        return self.sheets_ai.setup_estimate_constructor(
+            db_worksheet_name=db_worksheet_name,
+            calc_sheet_name=calc_sheet_name,
+        )
+    
     def fetch_web_content(self, url: str) -> str:
         """Загрузить контент с веб-страницы."""
         if not self.sheets_ai:

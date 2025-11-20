@@ -694,6 +694,19 @@
                             Проверить смету
                         </button>
 
+                        <button
+                            @click="setupEstimateConstructor"
+                            :disabled="loading"
+                            class="bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 disabled:bg-gray-400 transition-colors"
+                        >
+                            <i class="fas fa-hammer mr-2"></i>
+                            Настроить конструктор сметы в Sheets
+                        </button>
+
+                        <div v-if="estimateSetupMessage" class="result-box">
+                            <div class="whitespace-pre-wrap" v-html="formatResult(estimateSetupMessage)"></div>
+                        </div>
+
                         <div v-if="estimateResult" class="result-box">
                             <div class="whitespace-pre-wrap" v-html="formatResult(estimateResult)"></div>
                         </div>
@@ -908,6 +921,7 @@
                         quantityCol: 'F',
                     },
                     estimateResult: null,
+                    estimateSetupMessage: null,
                     stats: null,
                 };
             },
@@ -1434,6 +1448,27 @@
                     } catch (error) {
                         this.sheetsAlert = `Ошибка: ${error.message}`;
                         this.sheetPreview = null;
+                    } finally {
+                        this.loading = false;
+                    }
+                },
+                async setupEstimateConstructor() {
+                    this.loading = true;
+                    this.estimateSetupMessage = null;
+                    try {
+                        const response = await fetch('/api/estimate/setup-constructor', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({}),
+                        });
+                        const data = await response.json();
+                        if (data.success) {
+                            this.estimateSetupMessage = data.message || 'Конструктор сметы настроен.';
+                        } else {
+                            this.estimateSetupMessage = `Ошибка: ${data.error}`;
+                        }
+                    } catch (error) {
+                        this.estimateSetupMessage = `Ошибка: ${error.message}`;
                     } finally {
                         this.loading = false;
                     }
