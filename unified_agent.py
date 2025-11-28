@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 import gspread
+from gspread.exceptions import APIError, WorksheetNotFound
 from dotenv import load_dotenv
 
 REFERENCE_DIR = Path("./data/estimate_references")
@@ -1305,6 +1306,15 @@ class ConstructionAIAgent:
             remaining -= len(slice_text)
         return "\n\n".join(snippets)
 
+    def _prepare_worksheet(self, sheets_ai: GoogleSheetsAI, title: str, rows: int, cols: int) -> gspread.Worksheet:
+        """Получить/создать лист и очистить его."""
+        try:
+            worksheet = sheets_ai.spreadsheet.worksheet(title)
+            worksheet.clear()
+        except WorksheetNotFound:
+            worksheet = sheets_ai.spreadsheet.add_worksheet(title=title, rows=rows, cols=cols)
+        return worksheet
+
     def _create_estimate_sheet(
         self,
         sheet_title: str,
@@ -1369,8 +1379,8 @@ class ConstructionAIAgent:
             for note in notes:
                 rows.append(["", note, "", "", "", ""])
 
-        worksheet = sheets_ai.spreadsheet.sheet1
-        worksheet.update_title(sheet_title)
+        row_count = max(40, len(rows) + 15)
+        worksheet = self._prepare_worksheet(sheets_ai, sheet_title, row_count, 8)
         worksheet.update("A1", rows, value_input_option="USER_ENTERED")
 
         try:
@@ -1463,11 +1473,7 @@ class ConstructionAIAgent:
         sheets_ai: GoogleSheetsAI,
     ) -> Dict[str, Any]:
         """Создать лист-резюме с итогами."""
-        worksheet = sheets_ai.spreadsheet.add_worksheet(
-            title=title,
-            rows=20,
-            cols=6,
-        )
+        worksheet = self._prepare_worksheet(sheets_ai, title, 20, 6)
         rows = [
             [labels["brand"], "", "", "", "", ""],
             [labels["works_title"], "", "", "", "", ""],
@@ -1494,11 +1500,7 @@ class ConstructionAIAgent:
 
     def _create_master_sheet(self, title: str, labels: Dict[str, str], sheets_ai: GoogleSheetsAI) -> Dict[str, Any]:
         """Создать мастер-лист с заготовкой."""
-        worksheet = sheets_ai.spreadsheet.add_worksheet(
-            title=title,
-            rows=100,
-            cols=6,
-        )
+        worksheet = self._prepare_worksheet(sheets_ai, title, 100, 6)
         rows = [
             [labels["col_num"], labels["col_desc"], labels["col_unit"], labels["col_qty"], labels["col_price"], labels["col_total"]],
         ]
@@ -1589,13 +1591,20 @@ class ConstructionAIAgent:
 
             for suffix, variant_text in variants:
                 spreadsheet_title = f"{base_title} — {suffix}"
-                spreadsheet = gspread_client.create(spreadsheet_title)
-                spreadsheet.share(None, perm_type="anyone", role="reader")
-                temp_ai = GoogleSheetsAI(
-                    sheet_id=spreadsheet.id,
-                    openai_client=self.openai_client,
-                    llm_model=self.config.llm_model,
-                )
+                try:
+                    spreadsheet = gspread_client.create(spreadsheet_title)
+                    spreadsheet.share(None, perm_type="anyone", role="reader")
+                    temp_ai = GoogleSheetsAI(
+                        sheet_id=spreadsheet.id,
+                        openai_client=self.openai_client,
+                        llm_model=self.config.llm_model,
+                    )
+                except APIError as exc:
+                    logger.warning("Не удалось создать таблицу '%s': %s. Используем текущую таблицу.", spreadsheet_title, exc)
+                    if not self.sheets_ai:
+                        raise
+                    spreadsheet = self.sheets_ai.spreadsheet
+                    temp_ai = self.sheets_ai
                 estimate_sheet_title = f"{sheet_titles['estimate']} — {suffix}"
                 estimate_info = self._create_estimate_sheet(
                     sheet_title=estimate_sheet_title,
