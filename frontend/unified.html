@@ -692,6 +692,35 @@
                                     >
                                     <span>Автоматически искать цены для позиций</span>
                                 </label>
+                                <div class="grid md:grid-cols-2 gap-4">
+                                    <label class="inline-flex items-center space-x-2 text-sm text-gray-700">
+                                        <input
+                                            type="checkbox"
+                                            v-model="estimateCreate.createSheet"
+                                            class="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                                        >
+                                        <span>Создать Google Sheet</span>
+                                    </label>
+                                    <label class="inline-flex items-center space-x-2 text-sm text-gray-700">
+                                        <input
+                                            type="checkbox"
+                                            v-model="estimateCreate.doubleVariant"
+                                            class="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                                        >
+                                        <span>Сделать 2 варианта (старая/новая плитка)</span>
+                                    </label>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-2">
+                                        Имя листа (опционально)
+                                    </label>
+                                    <input
+                                        v-model="estimateCreate.worksheetName"
+                                        type="text"
+                                        class="w-full border border-gray-300 rounded-lg p-3"
+                                        placeholder="Например: Смете терраса"
+                                    >
+                                </div>
                             </div>
                             <div>
                                 <label class="block text-sm font-medium text-gray-700 mb-2">
@@ -714,13 +743,62 @@
                             Создать смету
                         </button>
 
+                        <div class="bg-white border border-gray-200 rounded-lg p-4 space-y-3">
+                            <div class="flex items-center justify-between">
+                                <h3 class="font-semibold text-gray-800">ИИ-помощник по смете</h3>
+                                <button
+                                    @click="estimateCreateMessages = []"
+                                    class="text-sm text-gray-500 hover:text-gray-700"
+                                >
+                                    Очистить
+                                </button>
+                            </div>
+                            <div class="h-48 overflow-y-auto border border-gray-200 rounded p-3 bg-gray-50 space-y-2 text-sm">
+                                <div v-if="!estimateCreateMessages.length" class="text-gray-500">
+                                    Задайте вопрос ассистенту, чтобы собрать вводные.
+                                </div>
+                                <div
+                                    v-for="(msg, idx) in estimateCreateMessages"
+                                    :key="'assist-' + idx"
+                                    :class="msg.role === 'assistant' ? 'text-gray-800' : 'text-blue-800'"
+                                >
+                                    <span class="font-semibold">
+                                        {{ msg.role === 'assistant' ? 'ИИ' : 'Вы' }}:
+                                    </span>
+                                    <span v-html="formatResult(msg.content)"></span>
+                                </div>
+                            </div>
+                            <div class="flex space-x-2">
+                                <input
+                                    v-model="estimateCreateAssistantInput"
+                                    type="text"
+                                    class="flex-1 border border-gray-300 rounded-lg p-3 text-sm"
+                                    placeholder="Спросите про количество, материалы, варианты..."
+                                >
+                                <button
+                                    @click="askEstimateAssistant"
+                                    :disabled="loading || !estimateCreateAssistantInput.trim()"
+                                    class="bg-gray-800 text-white px-4 py-2 rounded-lg hover:bg-gray-900 disabled:bg-gray-400 transition-colors"
+                                >
+                                    Спросить
+                                </button>
+                                <button
+                                    @click="appendAssistantToDescription"
+                                    :disabled="!lastAssistantMessage"
+                                    class="bg-white border border-gray-300 text-gray-800 px-3 py-2 rounded-lg hover:bg-gray-100 disabled:bg-gray-200 transition-colors"
+                                >
+                                    В текст сметы
+                                </button>
+                            </div>
+                        </div>
+
                         <div v-if="estimateCreateResult" class="result-box">
                             <template v-if="estimateCreateResult.error">
                                 <div class="text-red-600 font-semibold">
                                     Ошибка: {{ estimateCreateResult.error }}
                                 </div>
                             </template>
-                            <template v-else>
+                            <template v-else-if="estimateCreateResult.estimate">
                                 <div class="space-y-2">
                                     <div class="font-bold text-lg text-gray-800">
                                         Смета создана: {{ estimateCreateResult.estimate.metadata.name }}
@@ -744,11 +822,20 @@
                                                 {{ item.name }} — {{ item.quantity }} {{ item.unit }} × {{ item.unit_price }} = {{ item.total_price }}
                                             </li>
                                         </ul>
-                                        <div
-                                            v-if="estimateCreateResult.estimate.items.length > 3"
-                                            class="text-sm text-gray-500 mt-1"
-                                        >
+                                        <div v-if="estimateCreateResult.estimate.items.length > 3" class="text-sm text-gray-500 mt-1">
                                             Показаны первые 3 из {{ estimateCreateResult.estimate.items.length }} позиций.
+                                        </div>
+                                    </div>
+                                    <div v-if="estimateCreateResult.sheets && estimateCreateResult.sheets.length" class="pt-2 space-y-1">
+                                        <div class="font-semibold text-gray-800">Созданные листы:</div>
+                                        <div
+                                            v-for="(sheet, idx) in estimateCreateResult.sheets"
+                                            :key="'sheet-' + idx"
+                                            class="flex items-center space-x-2 text-blue-700"
+                                        >
+                                            <i class="fas fa-link"></i>
+                                            <a :href="sheet.url" target="_blank" class="underline">{{ sheet.title }}</a>
+                                            <span class="text-gray-600">— {{ sheet.rows }} строк · {{ sheet.subtotal.toFixed(2) }} → {{ sheet.total_with_iva.toFixed(2) }}</span>
                                         </div>
                                     </div>
                                 </div>
@@ -1035,7 +1122,12 @@
                         clientName: '',
                         textInput: '',
                         autoFindPrices: true,
+                        createSheet: true,
+                        worksheetName: '',
+                        doubleVariant: true,
                     },
+                    estimateCreateMessages: [],
+                    estimateCreateAssistantInput: '',
                     estimateCreateResult: null,
                     estimateCheck: {
                         estimateSheet: '',
@@ -1047,11 +1139,11 @@
                     stats: null,
                 };
             },
-            computed: {
-                sheetEmbedUrl() {
-                    if (!this.stats || !this.stats.sheet) {
-                        return null;
-                    }
+                computed: {
+                    sheetEmbedUrl() {
+                        if (!this.stats || !this.stats.sheet) {
+                            return null;
+                        }
                     const sheet = this.stats.sheet;
                     const spreadsheetId = sheet.spreadsheet_id;
                     if (!spreadsheetId) {
@@ -1059,14 +1151,19 @@
                     }
                     const rawId = sheet.worksheet_id ?? sheet.worksheetId;
                     let gidValue = 0;
-                    if (rawId !== undefined && rawId !== null) {
-                        const numeric = Number(rawId);
-                        gidValue = Number.isFinite(numeric) ? numeric : rawId;
-                    }
-                    const gid = encodeURIComponent(gidValue);
-                    return `https://docs.google.com/spreadsheets/d/${spreadsheetId}/htmlembed?gid=${gid}`;
+                        if (rawId !== undefined && rawId !== null) {
+                            const numeric = Number(rawId);
+                            gidValue = Number.isFinite(numeric) ? numeric : rawId;
+                        }
+                        const gid = encodeURIComponent(gidValue);
+                        return `https://docs.google.com/spreadsheets/d/${spreadsheetId}/htmlembed?gid=${gid}`;
+                    },
+                    lastAssistantMessage() {
+                        const reversed = [...this.estimateCreateMessages].reverse();
+                        const found = reversed.find(m => m.role === 'assistant');
+                        return found ? found.content : '';
+                    },
                 },
-            },
             watch: {
                 activeTab(newTab) {
                     if (newTab === 'sheets') {
@@ -1574,43 +1671,82 @@
                     this.loading = false;
                 }
             },
-            async createEstimate() {
-                if (!this.estimateCreate.name.trim()) {
-                    this.estimateCreateResult = { error: 'Введите название сметы' };
-                    return;
-                }
-                this.loading = true;
-                this.estimateCreateResult = null;
-                try {
-                    const payload = {
-                        name: this.estimateCreate.name,
-                        description: this.estimateCreate.description,
-                        client_name: this.estimateCreate.clientName,
-                        text_input: this.estimateCreate.textInput,
-                        auto_find_prices: this.estimateCreate.autoFindPrices,
-                    };
-                    const response = await fetch('/api/estimate/create', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(payload),
-                    });
-                    const data = await response.json();
-                    if (data.success) {
-                        this.estimateCreateResult = data;
-                    } else {
-                        this.estimateCreateResult = { error: data.error || 'Не удалось создать смету' };
+                async createEstimate() {
+                    if (!this.estimateCreate.textInput.trim()) {
+                        this.estimateCreateResult = { error: 'Введите текстовое описание работ' };
+                        return;
                     }
-                } catch (error) {
-                    this.estimateCreateResult = { error: error.message };
-                } finally {
-                    this.loading = false;
-                }
-            },
-            async setupEstimateConstructor() {
-                this.loading = true;
-                this.estimateSetupMessage = null;
-                try {
-                    const response = await fetch('/api/estimate/setup-constructor', {
+                    const now = new Date();
+                    const autoName = this.estimateCreate.name.trim() || `Смета ${now.toLocaleDateString('ru-RU')}`;
+                    const shortText = this.estimateCreate.textInput.trim().slice(0, 80);
+                    const autoDescription = this.estimateCreate.description.trim() || `Сформировано автоматически. ${shortText}`;
+                    const autoClient = this.estimateCreate.clientName.trim() || 'Клиент не указан';
+                    this.loading = true;
+                    this.estimateCreateResult = null;
+                    try {
+                        const payload = {
+                            name: autoName,
+                            description: autoDescription,
+                            client_name: autoClient,
+                            text_input: this.estimateCreate.textInput,
+                            auto_find_prices: this.estimateCreate.autoFindPrices,
+                            create_sheet: this.estimateCreate.createSheet,
+                            worksheet_name: this.estimateCreate.worksheetName,
+                            double_variant: this.estimateCreate.doubleVariant,
+                        };
+                        const response = await fetch('/api/estimate/create', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(payload),
+                        });
+                        const data = await response.json();
+                        if (data.success) {
+                            const estimatePayload = data.estimate?.estimate || data.estimate || null;
+                            const sheets = data.estimate?.sheets || data.sheets || [];
+                            this.estimateCreateResult = { success: true, estimate: estimatePayload, sheets };
+                        } else {
+                            this.estimateCreateResult = { error: data.error || 'Не удалось создать смету' };
+                        }
+                    } catch (error) {
+                        this.estimateCreateResult = { error: error.message };
+                    } finally {
+                        this.loading = false;
+                    }
+                },
+                async askEstimateAssistant() {
+                    const question = this.estimateCreateAssistantInput.trim();
+                    if (!question) return;
+                    this.estimateCreateMessages.push({ role: 'user', content: question });
+                    this.loading = true;
+                    try {
+                        const response = await fetch('/api/estimate/assistant', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ messages: this.estimateCreateMessages }),
+                        });
+                        const data = await response.json();
+                        if (data.success) {
+                            this.estimateCreateMessages.push({ role: 'assistant', content: data.reply });
+                        } else {
+                            this.estimateCreateMessages.push({ role: 'assistant', content: `Ошибка: ${data.error}` });
+                        }
+                    } catch (error) {
+                        this.estimateCreateMessages.push({ role: 'assistant', content: `Ошибка: ${error.message}` });
+                    } finally {
+                        this.loading = false;
+                        this.estimateCreateAssistantInput = '';
+                    }
+                },
+                appendAssistantToDescription() {
+                    if (!this.lastAssistantMessage) return;
+                    const joiner = this.estimateCreate.textInput ? '\n' : '';
+                    this.estimateCreate.textInput = `${this.estimateCreate.textInput}${joiner}${this.lastAssistantMessage}`;
+                },
+                async setupEstimateConstructor() {
+                    this.loading = true;
+                    this.estimateSetupMessage = null;
+                    try {
+                        const response = await fetch('/api/estimate/setup-constructor', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({}),

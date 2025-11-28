@@ -403,6 +403,9 @@ def create_estimate():
         client_name = data.get('client_name') or ""
         text_input = data.get('text_input') or ""
         auto_find_prices = bool(data.get('auto_find_prices', True))
+        create_sheet = bool(data.get('create_sheet', True))
+        worksheet_name = (data.get('worksheet_name') or "").strip() or None
+        double_variant = bool(data.get('double_variant', False))
 
         logger.info("Creating estimate")
         estimate_data = agent.create_estimate(
@@ -411,15 +414,38 @@ def create_estimate():
             text_input=text_input,
             client_name=client_name,
             auto_find_prices=auto_find_prices,
+            create_sheet=create_sheet,
+            worksheet_name=worksheet_name,
+            double_variant=double_variant,
         )
 
         return jsonify({
             'success': True,
             'estimate': estimate_data,
+            'sheets': estimate_data.get('sheets'),
             'timestamp': datetime.now().isoformat(),
         })
     except Exception as e:
         logger.error("Error creating estimate: %s", e)
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/estimate/assistant', methods=['POST'])
+def estimate_assistant():
+    """ИИ-помощник для пошагового составления сметы."""
+    if not agent:
+        return jsonify({'error': 'Agent not initialized'}), 500
+    try:
+        data = request.get_json() or {}
+        messages = data.get('messages') or []
+        reply = agent.estimate_assistant_reply(messages)
+        return jsonify({
+            'success': True,
+            'reply': reply,
+            'timestamp': datetime.now().isoformat(),
+        })
+    except Exception as e:
+        logger.error("Error in estimate assistant: %s", e)
         return jsonify({'error': str(e)}), 500
 
 

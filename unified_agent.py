@@ -27,6 +27,7 @@ from pathlib import Path
 from threading import Lock
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 
 import gspread
 from dotenv import load_dotenv
@@ -1037,6 +1038,330 @@ class ConstructionAIAgent:
             raise RuntimeError("Google Sheets AI not initialized")
         return self.sheets_ai.search_web(query)
 
+    def _make_unique_sheet_title(self, base_title: str) -> str:
+        """Подобрать уникальное имя листа в пределах таблицы."""
+        if not self.sheets_ai:
+            raise RuntimeError("Google Sheets is not configured")
+        existing = {ws.title for ws in self.sheets_ai.spreadsheet.worksheets()}
+        title = base_title
+        counter = 1
+        while title in existing:
+            counter += 1
+            title = f"{base_title} ({counter})"
+        return title
+
+    def _detect_language(self, *texts: str) -> str:
+        """Простейшее определение языка по набору текстов."""
+        joined = " ".join([t for t in texts if t]).lower()
+        if any("а" <= ch <= "я" or "ё" == ch for ch in joined):
+            return "ru"
+        if any(token in joined for token in ("azulejo", "portuga", "mapei", "desmontagem", "terraço", "terraÃ§o")):
+            return "pt"
+        return "en"
+
+    def _labels_for_language(self, lang: str) -> Dict[str, str]:
+        """Заголовки и подписи под язык пользователя."""
+        if lang == "ru":
+            return {
+                "brand": "VIORA BUILD",
+                "works_title": "ОПИСАНИЕ РАБОТ",
+                "section": "РАБОТЫ ПО ДЕМОНТАЖУ",
+                "col_num": "№",
+                "col_desc": "ОПИСАНИЕ РАБОТ",
+                "col_unit": "Ед.",
+                "col_qty": "Кол-во",
+                "col_price": "Цена за ед.",
+                "col_total": "Итого",
+                "notes_header": "Примечания",
+                "vat_label": "НДС",
+                "total_with_vat_label": "ИТОГО с НДС",
+            }
+        if lang == "en":
+            return {
+                "brand": "VIORA BUILD",
+                "works_title": "SCOPE OF WORK",
+                "section": "DEMOLITION WORKS",
+                "col_num": "No.",
+                "col_desc": "DESCRIPTION OF WORKS",
+                "col_unit": "Unit",
+                "col_qty": "Qty",
+                "col_price": "Unit Price",
+                "col_total": "Total",
+                "notes_header": "Notes",
+                "vat_label": "VAT",
+                "total_with_vat_label": "TOTAL WITH VAT",
+            }
+        # default Portuguese
+        return {
+            "brand": "VIORA BUILD",
+            "works_title": "DESCRIÇÃO DOS TRABALHOS",
+            "section": "TRABALHOS DE DESMONTAGEM",
+            "col_num": "№",
+            "col_desc": "DESCRIÇÃO DOS TRABALHOS",
+            "col_unit": "Unid.",
+            "col_qty": "Qtd.",
+            "col_price": "Preço por Un",
+            "col_total": "Valor Total",
+            "notes_header": "Notas",
+            "vat_label": "IVA",
+            "total_with_vat_label": "TOTAL COM IVA",
+        }
+
+    def _to_float(self, value: Any) -> float:
+        if value is None:
+            return 0.0
+        if isinstance(value, (int, float)):
+            return float(value)
+        try:
+            cleaned = (
+                str(value)
+                .replace("€", "")
+                .replace(" ", "")
+                .replace("\u00a0", "")
+                .replace(",", ".")
+            )
+            return float(cleaned)
+        except Exception:
+            return 0.0
+
+    def _format_currency(self, value: float, currency: str = "€") -> str:
+        return f"{currency}{value:,.2f}".replace(",", " ").replace(".", ",", 1)
+
+    def _fallback_estimate_table(self, text_input: str, variant_label: str, language: str) -> Dict[str, Any]:
+        """Запасной вариант генерации таблицы сметы, когда LLM недоступен."""
+        uses_new_tile = "нов" in text_input.lower() or "new" in text_input.lower() or "nova" in text_input.lower()
+
+        if language == "ru":
+            items = [
+                {"number": "1.1", "description": "Демонтаж существующей плитки (25x40), толщина 2,5 см", "unit": "м2", "quantity": 640, "unit_price": 10},
+                {"number": "1.2", "description": "Демонтаж старых опорных ножек для плитки", "unit": "м2", "quantity": 640, "unit_price": 3},
+                {"number": "1.3", "description": "Мойка/очистка террасы", "unit": "м2", "quantity": 640, "unit_price": 3},
+                {"number": "1.4", "description": "Нанесение гидроизоляции MAPEI (MAPE LASTIC) в 2 слоя", "unit": "м2", "quantity": 700, "unit_price": 12},
+                {"number": "1.4.1", "description": "1 слой с армирующей сеткой", "unit": "м2", "quantity": 700, "unit_price": 8.56},
+                {"number": "1.4.2", "description": "1 слой без сетки", "unit": "м2", "quantity": 700, "unit_price": 3.44},
+                {"number": "1.4.3", "description": "Mapelastic Smart Kit — Mapei", "unit": "м2", "quantity": 700, "unit_price": 8.56},
+                {"number": "1.7", "description": "Установка новых регулируемых опор для плитки", "unit": "м2", "quantity": 640, "unit_price": 25},
+                {"number": "1.8", "description": "Регулируемые опоры (средняя цена рынка)", "unit": "шт", "quantity": 6400, "unit_price": 3.85},
+            ]
+            notes = [
+                "По расчёту 10 опор/м² нужно 6 400 опор. Финальная цена уточняется у поставщика.",
+                "Все доп. работы и материалы считаются отдельно. НДС не включён.",
+            ]
+            if uses_new_tile:
+                items.append({"number": "1.9", "description": "Утилизация старой плитки", "unit": "м2", "quantity": 640, "unit_price": 4})
+                items.append({"number": "1.10", "description": "Поставка и укладка новой плитки", "unit": "м2", "quantity": 640, "unit_price": 35})
+                notes.append("Вариант с новой плиткой: учтена утилизация старой плитки и укладка новой.")
+        else:
+            items = [
+                {"number": "1.1", "description": "Desmontagem do azulejo existente (25x40), espessura 2,5cm", "unit": "m2", "quantity": 640, "unit_price": 10},
+                {"number": "1.2", "description": "Desmontagem dos pés de apoio antigos para azulejo", "unit": "m2", "quantity": 640, "unit_price": 3},
+                {"number": "1.3", "description": "Limpeza do terraço", "unit": "m2", "quantity": 640, "unit_price": 3},
+                {"number": "1.4", "description": "Aplicação de impermeabilização MAPEI (MAPE LASTIC) em 2 camadas", "unit": "m2", "quantity": 700, "unit_price": 12},
+                {"number": "1.4.1", "description": "1 camada com malha", "unit": "m2", "quantity": 700, "unit_price": 8.56},
+                {"number": "1.4.2", "description": "1 camada sem malha", "unit": "m2", "quantity": 700, "unit_price": 3.44},
+                {"number": "1.4.3", "description": "Mapelastic Smart Kit - Mapei", "unit": "m2", "quantity": 700, "unit_price": 8.56},
+                {"number": "1.7", "description": "Colocação dos novos pés para azulejo", "unit": "m2", "quantity": 640, "unit_price": 25},
+                {"number": "1.8", "description": "Novos pés telescópicos auto-nivelantes (média de mercado)", "unit": "un", "quantity": 6400, "unit_price": 3.85},
+            ]
+            notes = [
+                "Novos pés. De acordo com o consumo de 10 unidades/m², a quantidade necessária é de 6.400 unidades. Preço será confirmado com o fornecedor.",
+                "Todos os trabalhos e materiais adicionados serão calculados отдельно. IVA não включен.",
+            ]
+            if uses_new_tile:
+                items.append({"number": "1.9", "description": "Remoção e eliminação do azulejo antigo", "unit": "m2", "quantity": 640, "unit_price": 4})
+                items.append({"number": "1.10", "description": "Fornecimento e colocação de novo azulejo", "unit": "m2", "quantity": 640, "unit_price": 35})
+                notes.append("Segundo variante: inclui eliminação do azulejo antigo e colocação de novo.")
+
+        currency = "€"
+        for item in items:
+            qty = self._to_float(item.get("quantity"))
+            price = self._to_float(item.get("unit_price"))
+            item["total"] = qty * price
+
+            labels = self._labels_for_language(language)
+            return {
+                "section_title": labels["section"],
+                "currency": currency,
+                "iva_percent": 23,
+                "items": items,
+                "notes": notes,
+                "variant": variant_label,
+                "labels": labels,
+            }
+
+    def _generate_estimate_table_data(
+        self,
+        name: str,
+        description: str,
+        client_name: str,
+        text_input: str,
+        variant_label: str,
+    ) -> Dict[str, Any]:
+        """Использовать LLM, чтобы превратить текст задания в структурированную таблицу сметы."""
+        language = self._detect_language(name, description, client_name, text_input)
+        if not self.openai_client:
+            return self._fallback_estimate_table(text_input, variant_label, language)
+
+        system_prompt = """
+Ты сметчик (PT/EN/ES допускается), оформляешь коммерческое предложение для укладки плитки на террасе.
+Нужно вернуть JSON без пояснений вида:
+{
+  "section_title": "TRABALHOS DE DESMONTAGEM",
+  "currency": "€",
+  "iva_percent": 23,
+  "items": [
+     {"number": "1.1", "description": "...", "unit": "m2", "quantity": 640, "unit_price": 10},
+     ...
+  ],
+  "notes": ["краткие примечания"]
+}
+Требования:
+- Нумерация в стиле 1 / 1.1 / 1.2 (как на строительных сметах).
+- Единицы: m2 для площадей, un для штук.
+- Заполни quantity и unit_price (евро) осознанно; округляй до 2 знаков.
+- total не обязателен — если не укажешь, мы посчитаем qty*price.
+- Добавь 1–3 примечания (notes) про доп. работы, исключения, подтверждение цен у поставщика.
+- Используй тот же язык, что и вход (не переводить таблицу).
+"""
+        user_prompt = f"""
+Смета: {name}
+Клиент: {client_name or '—'}
+Описание: {description or '—'}
+Вариант: {variant_label}
+Язык: тот же, что в тексте ниже (детектируй автоматически)
+Задача/вход: {text_input}
+
+Сделай структуру, похожую на пример Viora Build: колонок 6 (№, DESCRIÇÃO, Unid., Qtd., Preço por Un, Valor Total).
+"""
+        try:
+            completion = self.openai_client.chat.completions.create(
+                model=self.config.llm_model,
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+            content = completion.choices[0].message.content
+            data = json.loads(content)
+            if not isinstance(data, dict) or "items" not in data:
+                raise ValueError("Unexpected LLM response")
+            data["labels"] = self._labels_for_language(language)
+            return data
+        except Exception as exc:
+            logger.warning("LLM estimate generation failed, using fallback: %s", exc)
+            return self._fallback_estimate_table(text_input, variant_label, language)
+
+    def _create_estimate_sheet(
+        self,
+        sheet_title: str,
+        name: str,
+        description: str,
+        client_name: str,
+        text_input: str,
+    ) -> Dict[str, Any]:
+        """Создать лист Google Sheets с оформленной сметой."""
+        if not self.sheets_ai:
+            raise RuntimeError("Google Sheets is not configured")
+
+        language = self._detect_language(name, description, client_name, text_input)
+        table_data = self._generate_estimate_table_data(
+            name=name,
+            description=description,
+            client_name=client_name,
+            text_input=text_input,
+            variant_label=sheet_title,
+        )
+        labels = table_data.get("labels") or self._labels_for_language(language)
+        currency = table_data.get("currency") or "€"
+        items: List[Dict[str, Any]] = table_data.get("items") or []
+        notes: List[str] = table_data.get("notes") or []
+        iva_percent = self._to_float(table_data.get("iva_percent") or 23)
+
+        rows: List[List[Any]] = []
+        rows.append(["", "", "", "", "", ""])
+        rows.append([labels["brand"], "", "", "", "", ""])
+        rows.append([labels["works_title"], "", "", "", "", ""])
+        rows.append([labels["col_num"], labels["col_desc"], labels["col_unit"], labels["col_qty"], labels["col_price"], labels["col_total"]])
+
+        subtotal = 0.0
+        section_title = table_data.get("section_title") or labels["section"]
+        rows.append(["1", section_title, "", "", "", ""])
+
+        for item in items:
+            qty = self._to_float(item.get("quantity"))
+            price = self._to_float(item.get("unit_price"))
+            total = item.get("total")
+            if total is None:
+                total = qty * price
+            subtotal += self._to_float(total)
+            rows.append([
+                item.get("number") or "",
+                item.get("description") or "",
+                item.get("unit") or "",
+                qty if qty else "",
+                price if price else "",
+                self._format_currency(total, currency) if total else "",
+            ])
+
+        iva_amount = round(subtotal * (iva_percent / 100), 2)
+        total_with_iva = round(subtotal + iva_amount, 2)
+
+        rows.append(["", "", "", "", "", ""])
+        rows.append(["", "TOTAL", "", "", "", self._format_currency(subtotal, currency)])
+        rows.append(["", f"{labels.get('vat_label', 'IVA')} {iva_percent:.0f}%", "", "", "", self._format_currency(iva_amount, currency)])
+        rows.append(["", labels.get("total_with_vat_label", "TOTAL COM IVA"), "", "", "", self._format_currency(total_with_iva, currency)])
+
+        if notes:
+            rows.append(["", "", "", "", "", ""])
+            for note in notes:
+                rows.append(["", note, "", "", "", ""])
+
+        worksheet = self.sheets_ai.spreadsheet.add_worksheet(
+            title=sheet_title,
+            rows=max(30, len(rows) + 10),
+            cols=8,
+        )
+        worksheet.update("A1", rows, value_input_option="USER_ENTERED")
+
+        # Минимальное форматирование в духе примера
+        try:
+            header_color = {"red": 0.0, "green": 0.34, "blue": 0.34}
+            self.sheets_ai.format_range(
+                "A4:F4",
+                {"backgroundColor": header_color, "textColor": {"red": 1, "green": 1, "blue": 1}, "bold": True, "alignment": "CENTER"},
+                worksheet_name=worksheet.title,
+            )
+            self.sheets_ai.format_range(
+                "A5:F5",
+                {"backgroundColor": header_color, "textColor": {"red": 1, "green": 1, "blue": 1}, "bold": True},
+                worksheet_name=worksheet.title,
+            )
+            total_start = len(items) + 7
+            self.sheets_ai.format_range(
+                f"E{total_start}:F{total_start+2}",
+                {"bold": True},
+                worksheet_name=worksheet.title,
+            )
+            self.sheets_ai.format_range(
+                "B:B",
+                {"wrapStrategy": "WRAP"},
+                worksheet_name=worksheet.title,
+            )
+        except Exception as exc:
+            logger.warning("Failed to format estimate sheet: %s", exc)
+
+        gid = getattr(worksheet, "id", None) or worksheet._properties.get("sheetId")
+        sheet_url = f"https://docs.google.com/spreadsheets/d/{self.sheets_ai.sheet_id}/edit#gid={gid}"
+
+        return {
+            "title": sheet_title,
+            "url": sheet_url,
+            "rows": len(rows),
+            "subtotal": subtotal,
+            "total_with_iva": total_with_iva,
+        }
+
     # ========================================================================
     # СМЕТА: Создание смет через конструктор
     # ========================================================================
@@ -1048,6 +1373,9 @@ class ConstructionAIAgent:
         text_input: str = "",
         client_name: str = "",
         auto_find_prices: bool = True,
+        create_sheet: bool = False,
+        worksheet_name: Optional[str] = None,
+        double_variant: bool = False,
     ) -> Dict[str, Any]:
         """
         Создать новую смету на основе текстового описания.
@@ -1058,14 +1386,22 @@ class ConstructionAIAgent:
             text_input: Текст с перечнем работ/материалов
             client_name: Имя клиента
             auto_find_prices: Подтягивать ли цены автоматически
+            create_sheet: Создать новый лист Google Sheets с оформленной сметой
+            worksheet_name: Базовое название листа (если создаём таблицу)
+            double_variant: Создать вторую версию сметы (например, с новой плиткой)
 
         Returns:
             Словарь с данными созданной сметы
         """
         if not self.estimate_constructor:
             raise RuntimeError("Estimate constructor not available")
+
         if not name:
-            raise ValueError("Название сметы обязательно")
+            name = f"Estimate {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        if not description:
+            description = (text_input[:120] + "...") if text_input else "Смета создана автоматически"
+        if not client_name:
+            client_name = "Клиент не указан"
 
         estimate = create_quick_estimate(
             constructor=self.estimate_constructor,
@@ -1076,7 +1412,61 @@ class ConstructionAIAgent:
             auto_find_prices=auto_find_prices,
         )
 
-        return estimate.to_dict()
+        result: Dict[str, Any] = {"estimate": estimate.to_dict()}
+
+        if create_sheet:
+            if not self.sheets_ai:
+                raise RuntimeError("Google Sheets is not configured, не могу создать таблицу сметы.")
+
+            base_title = (worksheet_name or name or "Estimate").strip() or "Estimate"
+            variants = [("Опция 1: текущая плитка", text_input)]
+            if double_variant:
+                variants.append((
+                    "Опция 2: новая плитка",
+                    f"{text_input}\nДобавь утилизацию старой плитки и укладку новой плитки вместо старой.",
+                ))
+
+            sheet_links = []
+            for suffix, variant_text in variants:
+                sheet_title = self._make_unique_sheet_title(f"{base_title} — {suffix}")
+                sheet_info = self._create_estimate_sheet(
+                    sheet_title=sheet_title,
+                    name=name,
+                    description=description,
+                    client_name=client_name,
+                    text_input=variant_text,
+                )
+                sheet_links.append(sheet_info)
+
+            result["sheets"] = sheet_links
+
+        return result
+
+    def estimate_assistant_reply(self, messages: List[Dict[str, str]]) -> str:
+        """ИИ-помощник для пошаговой проработки сметы."""
+        if not messages:
+            raise ValueError("Нет сообщений для ассистента")
+        if not self.openai_client:
+            raise RuntimeError("LLM недоступен")
+
+        system_prompt = """
+Ты опытный сметчик по отделке/плитке. Помогаешь шаг за шагом собрать вводные и предложить структуру сметы в стиле примера:
+- Табличные поля: №, DESCRIÇÃO DOS TRABALHOS, Unid., Qtd., Preço por Un, Valor Total.
+- Любишь португальские заголовки типа TRABALHOS DE DESMONTAGEM.
+- Всегда уточняешь недостающие данные (площадь, количество, марка материалов, нужна ли утилизация старых материалов, НДС).
+- Формулируешь ответы кратко, списками; если готов итог, перечисляешь позиции с нумерацией.
+"""
+        chat_messages = [{"role": "system", "content": system_prompt}]
+        for msg in messages:
+            role = msg.get("role") or "user"
+            content = msg.get("content") or ""
+            chat_messages.append({"role": role, "content": content})
+
+        completion = self.openai_client.chat.completions.create(
+            model=self.config.llm_model,
+            messages=chat_messages,
+        )
+        return completion.choices[0].message.content
     
     # ========================================================================
     # СМЕТА: Проверка строительных смет
