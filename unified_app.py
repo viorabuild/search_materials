@@ -379,6 +379,50 @@ def write_sheet():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/estimate/create', methods=['POST'])
+def create_estimate():
+    """
+    Создать смету на основе текстового описания.
+
+    Body:
+    {
+        "name": "Новый объект",
+        "description": "Короткое описание",
+        "client_name": "ООО Ромашка",
+        "text_input": "Список работ и материалов",
+        "auto_find_prices": true
+    }
+    """
+    if not agent:
+        return jsonify({'error': 'Agent not initialized'}), 500
+
+    try:
+        data = request.get_json() or {}
+        name = (data.get('name') or "").strip()
+        description = data.get('description') or ""
+        client_name = data.get('client_name') or ""
+        text_input = data.get('text_input') or ""
+        auto_find_prices = bool(data.get('auto_find_prices', True))
+
+        logger.info("Creating estimate")
+        estimate_data = agent.create_estimate(
+            name=name,
+            description=description,
+            text_input=text_input,
+            client_name=client_name,
+            auto_find_prices=auto_find_prices,
+        )
+
+        return jsonify({
+            'success': True,
+            'estimate': estimate_data,
+            'timestamp': datetime.now().isoformat(),
+        })
+    except Exception as e:
+        logger.error("Error creating estimate: %s", e)
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/estimate/check', methods=['POST'])
 def check_estimate():
     """

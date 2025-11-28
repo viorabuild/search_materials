@@ -46,7 +46,12 @@ from material_price_agent import (
     SupplierQuote,
     SearchTimeoutError,
 )
-from estimate_constructor import EstimateConstructor, EstimateItem, ItemType
+from estimate_constructor import (
+    EstimateConstructor,
+    EstimateItem,
+    ItemType,
+    create_quick_estimate,
+)
 from cache_manager import CacheManager
 from markdown_ai import GoogleSheetsAI
 from local_materials_db import LocalMaterialDatabase
@@ -1031,6 +1036,47 @@ class ConstructionAIAgent:
         if not self.sheets_ai:
             raise RuntimeError("Google Sheets AI not initialized")
         return self.sheets_ai.search_web(query)
+
+    # ========================================================================
+    # СМЕТА: Создание смет через конструктор
+    # ========================================================================
+
+    def create_estimate(
+        self,
+        name: str,
+        description: str = "",
+        text_input: str = "",
+        client_name: str = "",
+        auto_find_prices: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Создать новую смету на основе текстового описания.
+
+        Args:
+            name: Название сметы (обязательное)
+            description: Описание проекта
+            text_input: Текст с перечнем работ/материалов
+            client_name: Имя клиента
+            auto_find_prices: Подтягивать ли цены автоматически
+
+        Returns:
+            Словарь с данными созданной сметы
+        """
+        if not self.estimate_constructor:
+            raise RuntimeError("Estimate constructor not available")
+        if not name:
+            raise ValueError("Название сметы обязательно")
+
+        estimate = create_quick_estimate(
+            constructor=self.estimate_constructor,
+            name=name,
+            description=description or "",
+            text_input=text_input or "",
+            client_name=client_name or "",
+            auto_find_prices=auto_find_prices,
+        )
+
+        return estimate.to_dict()
     
     # ========================================================================
     # СМЕТА: Проверка строительных смет
