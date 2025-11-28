@@ -567,6 +567,14 @@ class ConstructionAIAgent:
                     logger.warning("Failed to create gspread client from file %s: %s", path, exc)
 
         return None
+
+    def _ensure_gspread_client(self) -> gspread.Client:
+        """Гарантировать наличие клиента gspread."""
+        if not getattr(self, "_gspread_client", None):
+            self._gspread_client = self._create_gspread_client()
+        if not self._gspread_client:
+            raise RuntimeError("Не удалось инициализировать Google Sheets client.")
+        return self._gspread_client
     
     def find_material_price(
         self,
@@ -1304,10 +1312,11 @@ class ConstructionAIAgent:
         description: str,
         client_name: str,
         text_input: str,
+        sheets_ai: GoogleSheetsAI,
     ) -> Dict[str, Any]:
         """Создать лист Google Sheets с оформленной сметой."""
-        if not self.sheets_ai:
-            raise RuntimeError("Google Sheets is not configured")
+        if not sheets_ai:
+            raise RuntimeError("Google Sheets AI is not configured for this spreadsheet")
 
         language = self._detect_language(name, description, client_name, text_input)
         table_data = self._generate_estimate_table_data(
@@ -1318,7 +1327,6 @@ class ConstructionAIAgent:
             variant_label=sheet_title,
         )
         labels = table_data.get("labels") or self._labels_for_language(language)
-        currency = table_data.get("currency") or "€"
         items: List[Dict[str, Any]] = table_data.get("items") or []
         notes: List[str] = table_data.get("notes") or []
         iva_percent = self._to_float(table_data.get("iva_percent") or 23)
@@ -1347,9 +1355,6 @@ class ConstructionAIAgent:
             ])
             current_row_index += 1
 
-        iva_amount = round(subtotal * (iva_percent / 100), 2)
-        total_with_iva = round(subtotal + iva_amount, 2)
-
         rows.append(["", "", "", "", "", ""])
         subtotal_row = len(rows) + 1
         last_item_row = current_row_index - 1
@@ -1364,17 +1369,13 @@ class ConstructionAIAgent:
             for note in notes:
                 rows.append(["", note, "", "", "", ""])
 
-        worksheet = self.sheets_ai.spreadsheet.add_worksheet(
-            title=sheet_title,
-            rows=max(40, len(rows) + 15),
-            cols=8,
-        )
+        worksheet = sheets_ai.spreadsheet.sheet1
+        worksheet.update_title(sheet_title)
         worksheet.update("A1", rows, value_input_option="USER_ENTERED")
 
-        # Минимальное форматирование в духе примера
         try:
-            header_color = {"red": 0.043, "green": 0.188, "blue": 0.18}  # #0B302E
-            self.sheets_ai.spreadsheet.batch_update({
+            header_color = {"red": 0.043, "green": 0.188, "blue": 0.18}
+            sheets_ai.spreadsheet.batch_update({
                 "requests": [
                     {
                         "mergeCells": {
@@ -1402,38 +1403,38 @@ class ConstructionAIAgent:
                     },
                 ]
             })
-            self.sheets_ai.format_range(
+            sheets_ai.format_range(
                 "A2:F3",
                 {"backgroundColor": header_color, "textColor": {"red": 1, "green": 1, "blue": 1}, "bold": True, "alignment": "CENTER", "fontFamily": "Calibri"},
                 worksheet_name=worksheet.title,
             )
-            self.sheets_ai.format_range(
+            sheets_ai.format_range(
                 "A4:F4",
                 {"backgroundColor": header_color, "textColor": {"red": 1, "green": 1, "blue": 1}, "bold": True, "alignment": "CENTER", "fontFamily": "Calibri"},
                 worksheet_name=worksheet.title,
             )
-            self.sheets_ai.format_range(
+            sheets_ai.format_range(
                 "A5:F5",
                 {"backgroundColor": header_color, "textColor": {"red": 1, "green": 1, "blue": 1}, "bold": True, "fontFamily": "Calibri"},
                 worksheet_name=worksheet.title,
             )
             total_start = len(items) + 7
-            self.sheets_ai.format_range(
+            sheets_ai.format_range(
                 f"E{total_start}:F{total_start+2}",
                 {"bold": True, "fontFamily": "Calibri"},
                 worksheet_name=worksheet.title,
             )
-            self.sheets_ai.format_range(
+            sheets_ai.format_range(
                 "B:B",
                 {"wrapStrategy": "WRAP", "fontFamily": "Calibri"},
                 worksheet_name=worksheet.title,
             )
-            self.sheets_ai.format_range(
+            sheets_ai.format_range(
                 f"A1:F{len(rows)}",
                 {"fontFamily": "Calibri"},
                 worksheet_name=worksheet.title,
             )
-            self.sheets_ai.format_range(
+            sheets_ai.format_range(
                 f"A5:F{len(rows)}",
                 {"borders": {"style": "SOLID", "color": {"red": 0, "green": 0, "blue": 0}}},
                 worksheet_name=worksheet.title,
@@ -1442,20 +1443,27 @@ class ConstructionAIAgent:
             logger.warning("Failed to format estimate sheet: %s", exc)
 
         gid = getattr(worksheet, "id", None) or worksheet._properties.get("sheetId")
-        sheet_url = f"https://docs.google.com/spreadsheets/d/{self.sheets_ai.sheet_id}/edit#gid={gid}"
+        sheet_url = f"https://docs.google.com/spreadsheets/d/{sheets_ai.spreadsheet.id}/edit#gid={gid}"
 
         return {
             "title": sheet_title,
             "url": sheet_url,
             "rows": len(rows),
-            "subtotal_formula": f"=SUM(F{first_item_row}:F{subtotal_row-2})",
+            "subtotal_formula": f"=SUM(F{first_item_row}:F{last_item_row})",
             "total_with_iva_cell": f"F{total_with_vat_row}",
             "sheet": sheet_title,
         }
 
-    def _create_summary_sheet(self, title: str, estimate_sheet_title: str, labels: Dict[str, str], total_cell: str) -> Dict[str, Any]:
+    def _create_summary_sheet(
+        self,
+        title: str,
+        estimate_sheet_title: str,
+        labels: Dict[str, str],
+        total_cell: str,
+        sheets_ai: GoogleSheetsAI,
+    ) -> Dict[str, Any]:
         """Создать лист-резюме с итогами."""
-        worksheet = self.sheets_ai.spreadsheet.add_worksheet(
+        worksheet = sheets_ai.spreadsheet.add_worksheet(
             title=title,
             rows=20,
             cols=6,
@@ -1468,12 +1476,12 @@ class ConstructionAIAgent:
         worksheet.update("A1", rows, value_input_option="USER_ENTERED")
         try:
             header_color = {"red": 0.043, "green": 0.188, "blue": 0.18}
-            self.sheets_ai.format_range(
+            sheets_ai.format_range(
                 "A1:F2",
                 {"backgroundColor": header_color, "textColor": {"red": 1, "green": 1, "blue": 1}, "bold": True, "fontFamily": "Calibri"},
                 worksheet_name=worksheet.title,
             )
-            self.sheets_ai.format_range(
+            sheets_ai.format_range(
                 "A1:F20",
                 {"fontFamily": "Calibri"},
                 worksheet_name=worksheet.title,
@@ -1481,12 +1489,12 @@ class ConstructionAIAgent:
         except Exception as exc:
             logger.warning("Failed to format summary sheet: %s", exc)
         gid = getattr(worksheet, "id", None) or worksheet._properties.get("sheetId")
-        url = f"https://docs.google.com/spreadsheets/d/{self.sheets_ai.sheet_id}/edit#gid={gid}"
+        url = f"https://docs.google.com/spreadsheets/d/{sheets_ai.spreadsheet.id}/edit#gid={gid}"
         return {"title": title, "url": url, "rows": len(rows), "sheet": title}
 
-    def _create_master_sheet(self, title: str, labels: Dict[str, str]) -> Dict[str, Any]:
+    def _create_master_sheet(self, title: str, labels: Dict[str, str], sheets_ai: GoogleSheetsAI) -> Dict[str, Any]:
         """Создать мастер-лист с заготовкой."""
-        worksheet = self.sheets_ai.spreadsheet.add_worksheet(
+        worksheet = sheets_ai.spreadsheet.add_worksheet(
             title=title,
             rows=100,
             cols=6,
@@ -1497,12 +1505,12 @@ class ConstructionAIAgent:
         worksheet.update("A1", rows, value_input_option="USER_ENTERED")
         try:
             header_color = {"red": 0.043, "green": 0.188, "blue": 0.18}
-            self.sheets_ai.format_range(
+            sheets_ai.format_range(
                 "A1:F1",
                 {"backgroundColor": header_color, "textColor": {"red": 1, "green": 1, "blue": 1}, "bold": True, "fontFamily": "Calibri"},
                 worksheet_name=worksheet.title,
             )
-            self.sheets_ai.format_range(
+            sheets_ai.format_range(
                 "A1:F100",
                 {"fontFamily": "Calibri"},
                 worksheet_name=worksheet.title,
@@ -1510,7 +1518,7 @@ class ConstructionAIAgent:
         except Exception as exc:
             logger.warning("Failed to format master sheet: %s", exc)
         gid = getattr(worksheet, "id", None) or worksheet._properties.get("sheetId")
-        url = f"https://docs.google.com/spreadsheets/d/{self.sheets_ai.sheet_id}/edit#gid={gid}"
+        url = f"https://docs.google.com/spreadsheets/d/{sheets_ai.spreadsheet.id}/edit#gid={gid}"
         return {"title": title, "url": url, "rows": 100, "sheet": title}
 
     # ========================================================================
@@ -1566,11 +1574,9 @@ class ConstructionAIAgent:
         result: Dict[str, Any] = {"estimate": estimate.to_dict()}
 
         if create_sheet:
-            if not self.sheets_ai:
-                raise RuntimeError("Google Sheets is not configured, не могу создать таблицу сметы.")
-
             base_title = (worksheet_name or name or "Estimate").strip() or "Estimate"
-            sheet_titles = self._sheet_titles_for_language(self._detect_language(name, description, client_name, text_input))
+            language = self._detect_language(name, description, client_name, text_input)
+            sheet_titles = self._sheet_titles_for_language(language)
             variants = [("Опция 1: текущая плитка", text_input)]
             if double_variant:
                 variants.append((
@@ -1578,22 +1584,55 @@ class ConstructionAIAgent:
                     f"{text_input}\nДобавь утилизацию старой плитки и укладку новой плитки вместо старой.",
                 ))
 
-            sheet_links = []
+            sheet_links: List[Dict[str, Any]] = []
+            gspread_client = self._ensure_gspread_client()
+
             for suffix, variant_text in variants:
-                estimate_sheet_title = self._make_unique_sheet_title(f"{base_title} — {suffix}")
-                estimate_sheet_info = self._create_estimate_sheet(
+                spreadsheet_title = f"{base_title} — {suffix}"
+                spreadsheet = gspread_client.create(spreadsheet_title)
+                spreadsheet.share(None, perm_type="anyone", role="reader")
+                temp_ai = GoogleSheetsAI(
+                    sheet_id=spreadsheet.id,
+                    openai_client=self.openai_client,
+                    llm_model=self.config.llm_model,
+                )
+                estimate_sheet_title = f"{sheet_titles['estimate']} — {suffix}"
+                estimate_info = self._create_estimate_sheet(
                     sheet_title=estimate_sheet_title,
                     name=name,
                     description=description,
                     client_name=client_name,
                     text_input=variant_text,
+                    sheets_ai=temp_ai,
                 )
-                summary_sheet_title = self._make_unique_sheet_title(f"{sheet_titles['summary']} — {suffix}")
-                master_sheet_title = self._make_unique_sheet_title(f"{sheet_titles['master']} — {suffix}")
-                labels = self._labels_for_language(self._detect_language(name, description, client_name, text_input))
-                summary_info = self._create_summary_sheet(summary_sheet_title, estimate_sheet_info["sheet"], labels, estimate_sheet_info["total_with_iva_cell"])
-                master_info = self._create_master_sheet(master_sheet_title, labels)
-                sheet_links.extend([summary_info, estimate_sheet_info, master_info])
+                summary_sheet_title = f"{sheet_titles['summary']} — {suffix}"
+                master_sheet_title = f"{sheet_titles['master']} — {suffix}"
+                labels = self._labels_for_language(language)
+                summary_info = self._create_summary_sheet(
+                    title=summary_sheet_title,
+                    estimate_sheet_title=estimate_sheet_title,
+                    labels=labels,
+                    total_cell=estimate_info["total_with_iva_cell"],
+                    sheets_ai=temp_ai,
+                )
+                master_info = self._create_master_sheet(
+                    title=master_sheet_title,
+                    labels=labels,
+                    sheets_ai=temp_ai,
+                )
+
+                spreadsheet_url = f"https://docs.google.com/spreadsheets/d/{spreadsheet.id}"
+                for info, info_type in (
+                    (summary_info, "summary"),
+                    (estimate_info, "estimate"),
+                    (master_info, "master"),
+                ):
+                    info["type"] = info_type
+                    info["spreadsheet_id"] = spreadsheet.id
+                    info["spreadsheet_title"] = spreadsheet.title
+                    info["spreadsheet_url"] = spreadsheet_url
+
+                sheet_links.extend([summary_info, estimate_info, master_info])
 
             result["sheets"] = sheet_links
 
