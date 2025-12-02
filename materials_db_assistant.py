@@ -265,6 +265,8 @@ class MaterialsDatabaseAssistant:
             return self._cancel_change(confirmation_id)
         if intent == "list_pending":
             return self._list_pending()
+        if intent == "translate_names":
+            return self._stage_name_translations(worksheet_hint)
         if intent == "help":
             return self._help_message()
 
@@ -319,7 +321,7 @@ class MaterialsDatabaseAssistant:
             f"{sheets_text}.\n\n"
             "Определи намерение пользователя и верни JSON вида:\n"
             "{\n"
-            '  "intent": "lookup|stage_update|stage_insert|stage_delete|confirm_change|cancel_change|list_pending|help",\n'
+            '  "intent": "lookup|stage_update|stage_insert|stage_delete|confirm_change|cancel_change|list_pending|translate_names|help",\n'
             '  "record_id": "ID записи или null",\n'
             '  "query": "строка поиска или null",\n'
             '  "fields": { "Колонка": "значение", ... },\n'
@@ -332,6 +334,7 @@ class MaterialsDatabaseAssistant:
             "- Для добавления стремись задать хотя бы поля ID, Название RU , Категория, Стоимость.\n"
             "- Никогда не выполняй изменения напрямую — используй stage_* и жди подтверждения через confirm_change.\n"
             "- Если листов несколько, обязательно указывай worksheet (используй одно из доступных названий).\n"
+            "- Если запрос касается проверки/перевода столбца Name/Название на английский, используй intent=translate_names и передавай worksheet, если он указан.\n"
             "- Если запрос не ясен, возвращай intent=help.\n"
             "- Всегда возвращай строго валидный JSON без комментариев."
         )
@@ -382,9 +385,12 @@ class MaterialsDatabaseAssistant:
         if response and getattr(response, "choices", None):
             content = response.choices[0].message.content or ""
 
-        return self._parse_json(content)
+        parsed = self._parse_json(content)
+        if isinstance(parsed, dict):
+            return parsed
+        return None
 
-    def _parse_json(self, payload: str) -> Optional[Dict[str, Any]]:
+    def _parse_json(self, payload: str) -> Optional[Any]:
         text = (payload or "").strip()
         if not text:
             return None
@@ -396,9 +402,7 @@ class MaterialsDatabaseAssistant:
                 text = text[:fence_end].strip()
 
         try:
-            data = json.loads(text)
-            if isinstance(data, dict):
-                return data
+            return json.loads(text)
         except json.JSONDecodeError:
             logger.warning("Materials DB assistant: invalid JSON response: %s", text)
         return None
@@ -478,6 +482,164 @@ class MaterialsDatabaseAssistant:
 
         header = f"🔎 Найдено {len(matches)} совпадений для '{search_query}':"
         return "\n".join([header, *matches])
+
+    def _stage_name_translations(self, worksheet_hint: Optional[str]) -> str:
+        """Prepare staged updates with English translations for the Name column."""
+        source_header = self._match_header("Название RU ")
+        target_header = self._match_header("Name") or self._match_header("Nome ")
+        if not source_header:
+            return "❌ Не найден столбец с исходными названиями (например, 'Название RU')."
+        if not target_header:
+            return "❌ Не найден столбец для перевода (например, 'Name' или 'Nome')."
+
+        rows = self._read_all_rows(worksheet=worksheet_hint)
+        if not rows:
+            return "ℹ️ Нет строк для обработки в выбранном листе."
+
+        pending_ids = {change.record_id for change in self._pending.values() if change.record_id}
+        candidates: List[Dict[str, Any]] = []
+        for row in rows:
+            record_id = (row.get("ID") or "").strip()
+            if not record_id or record_id in pending_ids:
+                continue
+            source_value = (row.get(source_header) or "").strip()
+            target_value = (row.get(target_header) or "").strip()
+            if not self._needs_translation(source_value, target_value):
+                continue
+            candidates.append(
+                {
+                    "id": record_id,
+                    "source": source_value,
+                    "target": target_value,
+                    "worksheet": row.get("_worksheet"),
+                }
+            )
+
+        if not candidates:
+            return f"✅ Все записи уже имеют перевод в столбце {target_header}."
+
+        max_batch = 20
+        batch = candidates[:max_batch]
+        translations = self._request_name_translations(batch)
+        if not translations:
+            return "❌ Не удалось получить переводы от модели."
+
+        staged_count = 0
+        staged_ids: List[str] = []
+        for candidate in batch:
+            record_id = candidate["id"]
+            new_value = translations.get(record_id)
+            if not new_value:
+                continue
+
+            before_keys = set(self._pending.keys())
+            result = self._stage_update(
+                record_id,
+                {target_header: new_value},
+                reason="Автоперевод столбца Name на английский",
+                worksheet_hint=candidate.get("worksheet"),
+            )
+            after_keys = set(self._pending.keys())
+            new_changes = after_keys - before_keys
+            if new_changes:
+                staged_count += 1
+                staged_ids.extend(sorted(new_changes))
+            elif result.strip().startswith("📝"):
+                staged_count += 1
+
+        if not staged_count:
+            return "ℹ️ Переводы получены, но обновления не требуются."
+
+        suffix = ""
+        if len(candidates) > max_batch:
+            suffix = f" Обработаны первые {max_batch} из {len(candidates)} записей; повторите команду для остальных."
+
+        ids_text = f" Изменения: {', '.join(sorted(set(staged_ids)))}." if staged_ids else ""
+        return f"📝 Подготовлено {staged_count} переводов для столбца {target_header}.{ids_text}{suffix}"
+
+    def _request_name_translations(self, items: List[Dict[str, str]]) -> Dict[str, str]:
+        """Ask the LLM to translate provided names into English."""
+        if not items:
+            return {}
+
+        payload = [{"id": item["id"], "name": item["source"]} for item in items]
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "Translate construction material or work names to English. "
+                    "Keep measurements/brands, avoid adding commentary. "
+                    "Return JSON array with objects {\"id\": \"...\", \"name_en\": \"...\"}. "
+                    "If a name already looks English, return it unchanged."
+                ),
+            },
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+        ]
+
+        try:
+            response = self.llm_client.chat.completions.create(
+                model=self.llm_model,
+                messages=messages,
+                temperature=0.0,
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "translations",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "id": {"type": "string"},
+                                    "name_en": {"type": "string"},
+                                },
+                                "required": ["id", "name_en"],
+                            },
+                        },
+                    },
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Translation request failed: %s", exc)
+            return {}
+
+        content = ""
+        if response and getattr(response, "choices", None):
+            content = response.choices[0].message.content or ""
+
+        parsed = self._parse_json(content)
+        translations: Dict[str, str] = {}
+        if isinstance(parsed, list):
+            for item in parsed:
+                if not isinstance(item, dict):
+                    continue
+                record_id = str(item.get("id") or "").strip()
+                translated = str(item.get("name_en") or "").strip()
+                if record_id and translated:
+                    translations[record_id] = translated
+        elif isinstance(parsed, dict):
+            # Fallback shape: {id: translation}
+            for record_id, translated in parsed.items():
+                if record_id and isinstance(translated, str):
+                    translations[str(record_id)] = translated.strip()
+
+        return translations
+
+    @staticmethod
+    def _contains_cyrillic(text: str) -> bool:
+        return bool(re.search(r"[а-яА-ЯёЁ]", text or ""))
+
+    def _needs_translation(self, source: str, target: str) -> bool:
+        """Heuristic to decide whether a translation is required."""
+        if not source:
+            return False
+        if not target:
+            return True
+        if target == source and self._contains_cyrillic(source):
+            return True
+        if self._contains_cyrillic(target):
+            return True
+        return False
 
     def _format_record_details(self, record: Dict[str, str]) -> str:
         parts = [f"🔎 Запись {record.get('ID', 'без ID')}"]
@@ -872,6 +1034,7 @@ class MaterialsDatabaseAssistant:
             "📝 «обнови цену M-CON-001 на €90» — подготовка изменения",
             "➕ «добавь материал с ID ...» — добавление новой записи",
             "🗑 «удали работу M-WORK-010» — подготовка удаления",
+            "🌐 «переведи столбец Name на английский» — автоперевод пустых/русских значений",
             "📋 «список изменений» — показать подготовленные изменения",
             "✅ «подтверди изменение CHG-1234» — применить обновление",
             "⛔️ «отмени изменение CHG-1234» — отменить подготовку",

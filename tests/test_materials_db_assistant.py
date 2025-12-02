@@ -24,6 +24,38 @@ def _write_csv(path, rows):
             handle.write(",".join(row) + "\n")
 
 
+class _TranslationLLM:
+    """Dummy LLM that echoes translations for testing."""
+
+    def __init__(self) -> None:
+        self.chat = SimpleNamespace(
+            completions=SimpleNamespace(create=self._create),
+        )
+
+    def _create(self, **kwargs):
+        messages = kwargs.get("messages") or []
+        user_content = ""
+        if messages:
+            user_content = messages[-1].get("content") or ""
+        try:
+            payload = json.loads(user_content)
+        except Exception:
+            payload = []
+
+        translations = []
+        for item in payload if isinstance(payload, list) else []:
+            if not isinstance(item, dict):
+                continue
+            record_id = item.get("id") or item.get("record_id")
+            name = item.get("name") or item.get("source")
+            if record_id and name:
+                translations.append({"id": record_id, "name_en": f"EN {name}"})
+
+        message = SimpleNamespace(content=json.dumps(translations, ensure_ascii=False))
+        choice = SimpleNamespace(message=message)
+        return SimpleNamespace(choices=[choice])
+
+
 def test_pending_changes_survive_restart(tmp_path):
     csv_path = tmp_path / "materials.csv"
     cache_path = tmp_path / "cache" / "materials_pending.json"
@@ -118,3 +150,28 @@ def test_pending_cleanup_drops_missing_records(tmp_path):
         persisted = json.load(handle)
 
     assert persisted["changes"] == []
+
+
+def test_translate_names_stages_updates(tmp_path):
+    csv_path = tmp_path / "materials.csv"
+    with csv_path.open("w", encoding="utf-8", newline="") as handle:
+        handle.write("ID,Название RU ,Nome ,Стоимость\n")
+        handle.write("MAT-001,Арматура,,100\n")
+        handle.write("MAT-002,Paint,Paint,50\n")
+
+    assistant = MaterialsDatabaseAssistant(
+        csv_path=csv_path,
+        llm_client=_TranslationLLM(),
+        llm_model="dummy",
+        sync_csv=False,
+        pending_cache_path=tmp_path / "cache" / "materials_pending.json",
+        pending_expiration_seconds=None,
+    )
+
+    result = assistant._stage_name_translations(None)
+
+    assert "Подготовлено 1" in result
+    assert assistant.pending_count() == 1
+    change = next(iter(assistant._pending.values()))
+    assert change.record_id == "MAT-001"
+    assert change.fields.get("Nome ") == "EN Арматура"
