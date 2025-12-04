@@ -25,9 +25,10 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from threading import Lock
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
 from dataclasses import dataclass
 from datetime import datetime
+from urllib.parse import urlparse, parse_qs
 
 import gspread
 from gspread.exceptions import APIError, WorksheetNotFound
@@ -1628,6 +1629,35 @@ class ConstructionAIAgent:
 
         return sheet_links
 
+    def _parse_sheet_reference(self, ref: Optional[str]) -> Tuple[Optional[str], Optional[str], Optional[int]]:
+        """
+        Разобрать ссылку/ID/название листа:
+        - Если ссылка на Google Sheets → вернуть spreadsheet_id и gid (если указан)
+        - Иначе вернуть (None, ref, None) — будем искать лист по имени в текущей таблице
+        """
+        if not ref:
+            return None, None, None
+        if "docs.google.com/spreadsheets" not in ref:
+            return None, ref, None
+        try:
+            parsed = urlparse(ref)
+            parts = parsed.path.split("/")
+            sheet_id = None
+            if "d" in parts:
+                idx = parts.index("d")
+                if idx + 1 < len(parts):
+                    sheet_id = parts[idx + 1]
+            gid = None
+            qs = parse_qs(parsed.query)
+            if "gid" in qs:
+                try:
+                    gid = int(qs["gid"][0])
+                except Exception:
+                    gid = None
+            return sheet_id, None, gid
+        except Exception:
+            return None, ref, None
+
     def _create_summary_sheet(
         self,
         title: str,
@@ -2013,16 +2043,31 @@ class ConstructionAIAgent:
             if not self.sheets_ai or not self.sheets_ai.estimate_checker:
                 return "❌ Estimate checker not available"
 
-            estimate_sheet = estimate_sheet or self.config.google_worksheet_name
+            sheet_ref = estimate_sheet or self.config.google_worksheet_name
+            sheet_id, sheet_name, sheet_gid = self._parse_sheet_reference(sheet_ref)
 
             try:
-                estimate_worksheet = self.sheets_ai.spreadsheet.worksheet(estimate_sheet)
+                client = self._ensure_gspread_client()
+                spreadsheet = None
+                if sheet_id:
+                    spreadsheet = client.open_by_key(sheet_id)
+                else:
+                    spreadsheet = self.sheets_ai.spreadsheet
+
+                estimate_worksheet = None
+                if sheet_gid is not None:
+                    estimate_worksheet = spreadsheet.get_worksheet_by_id(sheet_gid)
+                elif sheet_name:
+                    estimate_worksheet = spreadsheet.worksheet(sheet_name)
+                else:
+                    estimate_worksheet = spreadsheet.sheet1
+
                 estimate_data = estimate_worksheet.get_all_values()
 
                 master_data: List[List[str]] = []
                 if master_sheet:
                     try:
-                        master_worksheet = self.sheets_ai.spreadsheet.worksheet(master_sheet)
+                        master_worksheet = spreadsheet.worksheet(master_sheet)
                         master_data = master_worksheet.get_all_values()
                     except Exception as exc:  # noqa: BLE001
                         logger.warning("Master sheet '%s' not found, продолжаем без него: %s", master_sheet, exc)
