@@ -32,6 +32,7 @@ from urllib.parse import urlparse, parse_qs
 
 import gspread
 from gspread.exceptions import APIError, WorksheetNotFound
+from gspread.utils import a1_range_to_grid_range
 from dotenv import load_dotenv
 
 REFERENCE_DIR = Path("./data/estimate_references")
@@ -1330,25 +1331,58 @@ class ConstructionAIAgent:
         return result
 
     def _apply_borders_only(self, sheets_ai: GoogleSheetsAI, worksheet: gspread.Worksheet, values: List[List[Any]]) -> None:
-        """Применить рамки к диапазону с данными, не трогая содержимое."""
-        max_row = 0
-        max_col = 0
-        for r_idx, row in enumerate(values, start=1):
-            if any(str(c).strip() for c in row):
-                max_row = max(max_row, r_idx)
-                max_col = max(max_col, max((idx + 1 for idx, c in enumerate(row) if str(c).strip()), default=0))
-        if max_row == 0 or max_col == 0:
+        """Применить рамки только к непустым ячейкам (текст/числа), не трогая остальные."""
+        if not sheets_ai:
             return
-        end_col_letter = self._column_letter(max_col)
-        data_range = f"A1:{end_col_letter}{max_row}"
-        try:
-            sheets_ai.format_range(
-                data_range,
-                {"borders": {"style": "SOLID", "color": {"red": 0, "green": 0, "blue": 0}}},
-                worksheet_name=worksheet.title,
-            )
-        except Exception as exc:
-            logger.warning("Failed to apply borders to %s: %s", data_range, exc)
+        border_style = {"style": "SOLID", "color": {"red": 0, "green": 0, "blue": 0}}
+        border_format = {
+            "userEnteredFormat": {
+                "borders": {
+                    "top": dict(border_style),
+                    "bottom": dict(border_style),
+                    "left": dict(border_style),
+                    "right": dict(border_style),
+                }
+            },
+            "fields": "userEnteredFormat.borders",
+        }
+        sheet_id = getattr(worksheet, "id", None) or worksheet._properties.get("sheetId")
+        if isinstance(sheet_id, str) and sheet_id.isdigit():
+            sheet_id = int(sheet_id)
+        requests_batch: List[Dict[str, Any]] = []
+        batch_limit = 100  # запросов в одном batchUpdate
+        for r_idx, row in enumerate(values, start=1):
+            segments: List[Tuple[int, int]] = []
+            start = None
+            for c_idx, cell in enumerate(row, start=1):
+                if str(cell).strip() != "":
+                    if start is None:
+                        start = c_idx
+                else:
+                    if start is not None:
+                        segments.append((start, c_idx - 1))
+                        start = None
+            if start is not None:
+                segments.append((start, len(row)))
+
+            for start_col, end_col in segments:
+                start_letter = self._column_letter(start_col)
+                end_letter = self._column_letter(end_col)
+                range_a1 = f"{start_letter}{r_idx}:{end_letter}{r_idx}"
+                try:
+                    grid_range = a1_range_to_grid_range(range_a1, sheet_id)
+                    requests_batch.append({"repeatCell": {"range": grid_range, **border_format}})
+                    if len(requests_batch) >= batch_limit:
+                        sheets_ai.spreadsheet.batch_update({"requests": requests_batch})
+                        requests_batch = []
+                        time.sleep(0.5)
+                except Exception as exc:
+                    logger.warning("Failed to queue borders for %s: %s", range_a1, exc)
+        if requests_batch:
+            try:
+                sheets_ai.spreadsheet.batch_update({"requests": requests_batch})
+            except Exception as exc:
+                logger.warning("Failed to apply batched borders: %s", exc)
 
     def _build_estimate_rows(
         self,
@@ -2014,41 +2048,46 @@ class ConstructionAIAgent:
             raise ValueError("Лист пуст, нечего импортировать")
         headers = values[0] if values else []
         rows = values[1:] if len(values) > 1 else []
-        try:
-            df = self.estimate_importer.dataframe_from_values(headers, rows)
-            estimate = self.estimate_importer.import_from_dataframe(
-                df=df,
-                column_map=column_map,
-                name=name or worksheet.title,
-                description=description,
-                client_name=client_name,
-                currency=currency,
-                default_item_type=default_item_type,
-            )
-        except Exception as exc:
-            logger.warning("DataFrame import failed, using rows fallback: %s", exc)
-            estimate = self.estimate_importer.import_from_rows(
-                headers=headers,
-                rows=rows,
-                column_map=column_map,
-                name=name or worksheet.title,
-                description=description,
-                client_name=client_name,
-                currency=currency,
-                default_item_type=default_item_type,
-            )
+        estimate: Optional[Estimate] = None
+        if rewrite_source_sheet:
+            try:
+                df = self.estimate_importer.dataframe_from_values(headers, rows)
+                estimate = self.estimate_importer.import_from_dataframe(
+                    df=df,
+                    column_map=column_map,
+                    name=name or worksheet.title,
+                    description=description,
+                    client_name=client_name,
+                    currency=currency,
+                    default_item_type=default_item_type,
+                )
+            except Exception as exc:
+                logger.warning("DataFrame import failed, using rows fallback: %s", exc)
+                estimate = self.estimate_importer.import_from_rows(
+                    headers=headers,
+                    rows=rows,
+                    column_map=column_map,
+                    name=name or worksheet.title,
+                    description=description,
+                    client_name=client_name,
+                    currency=currency,
+                    default_item_type=default_item_type,
+                )
 
-        result: Dict[str, Any] = {"estimate": estimate.to_dict()}
+        result: Dict[str, Any] = {"estimate": estimate.to_dict() if estimate else None}
 
         if create_sheet:
-            language = self._detect_language(
-                estimate.metadata.name,
-                estimate.metadata.description,
-                estimate.metadata.client_name,
-                "",
-            )
+            if estimate:
+                language = self._detect_language(
+                    estimate.metadata.name,
+                    estimate.metadata.description,
+                    estimate.metadata.client_name,
+                    "",
+                )
+            else:
+                language = self._detect_language(worksheet.title, "", "", "")
             base_title = name or worksheet.title
-            if rewrite_source_sheet:
+            if rewrite_source_sheet and estimate:
                 sheet_links = self._render_estimate_to_sheets(
                     estimate=estimate,
                     base_title=base_title,
@@ -2060,7 +2099,14 @@ class ConstructionAIAgent:
                 )
             else:
                 # Только формат: добавить рамки на существующий диапазон, данные не трогаем
-                self._apply_borders_only(self.sheets_ai, worksheet, values)
+                target_ai = self.sheets_ai
+                if not target_ai or (target_ai.spreadsheet.id != spreadsheet.id):
+                    target_ai = GoogleSheetsAI(
+                        sheet_id=spreadsheet.id,
+                        openai_client=self.openai_client,
+                        llm_model=self.config.llm_model,
+                    )
+                self._apply_borders_only(target_ai, worksheet, values)
                 sheet_links = [{
                     "type": "estimate",
                     "title": worksheet.title,
