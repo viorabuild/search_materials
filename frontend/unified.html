@@ -857,16 +857,32 @@
                             Вставьте ссылку или ID Google-таблицы со сметой — агент определит колонки и создаст листы в формате VIORA.
                         </p>
 
-                        <div>
+                        <div class="space-y-2">
                             <label class="block text-sm font-medium text-gray-700 mb-2">
                                 Ссылка или ID таблицы
                             </label>
                             <input
                                 v-model="estimateFormat.source"
+                                @change="loadFormatHeaders"
                                 type="text"
                                 class="w-full border border-gray-300 rounded-lg p-3"
                                 placeholder="https://docs.google.com/spreadsheets/d/..."
                             >
+                        </div>
+
+                        <div v-if="estimateFormat.headers && estimateFormat.headers.length" class="space-y-2">
+                            <label class="block text-sm font-medium text-gray-700 mb-2">
+                                Колонка описания (опционально)
+                            </label>
+                            <select
+                                v-model="estimateFormat.descriptionColumn"
+                                class="w-full border border-gray-300 rounded-lg p-3"
+                            >
+                                <option value="">Определить автоматически</option>
+                                <option v-for="(h, idx) in estimateFormat.headers" :key="'hdr-'+idx" :value="h">
+                                    {{ h || '(пустая ячейка)' }}
+                                </option>
+                            </select>
                         </div>
 
                         <button
@@ -1225,6 +1241,31 @@
                         const found = reversed.find(m => m.role === 'assistant');
                         return found ? found.content : '';
                     },
+                },
+                async loadFormatHeaders() {
+                    if (!this.estimateFormat.source.trim()) {
+                        this.estimateFormat.headers = [];
+                        this.estimateFormat.descriptionColumn = '';
+                        return;
+                    }
+                    try {
+                        const payload = {
+                            google_sheet_id: this.extractSheetId(this.estimateFormat.source),
+                        };
+                        const response = await fetch('/api/estimate/headers', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(payload),
+                        });
+                        const data = await response.json();
+                        if (data.success) {
+                            this.estimateFormat.headers = data.headers || [];
+                        } else {
+                            this.estimateFormat.headers = [];
+                        }
+                    } catch (error) {
+                        this.estimateFormat.headers = [];
+                    }
                 },
             watch: {
                 activeTab(newTab) {
@@ -1859,6 +1900,9 @@
                     try {
                         const payload = {
                             google_sheet_id: this.extractSheetId(this.estimateFormat.source),
+                            column_map: this.estimateFormat.descriptionColumn
+                                ? { description: this.estimateFormat.descriptionColumn }
+                                : undefined,
                         };
 
                         const response = await fetch('/api/estimate/import', {
