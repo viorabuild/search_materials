@@ -5,6 +5,7 @@
 ## Зависимости
 - `pandas` + `openpyxl` (добавлены в `requirements.txt`)
 - Настроенный `ConstructionAIAgent` (для записи в Google Sheets нужны `GOOGLE_SHEET_ID` и сервисный аккаунт)
+- По умолчанию агент работает с таблицей смет: `https://docs.google.com/spreadsheets/d/1wH-E6np_IMXs566B94mgAeTliPHvF41zEJvPVulbKBM/` (можно переопределить `GOOGLE_SHEET_ID`)
 
 ## Python API
 ```python

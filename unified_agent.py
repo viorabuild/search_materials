@@ -34,6 +34,7 @@ from gspread.exceptions import APIError, WorksheetNotFound
 from dotenv import load_dotenv
 
 REFERENCE_DIR = Path("./data/estimate_references")
+DEFAULT_ESTIMATE_SHEET_ID = "1wH-E6np_IMXs566B94mgAeTliPHvF41zEJvPVulbKBM"
 from llm_provider import FallbackOpenAI, LLMFallbackConfig
 
 try:  # pragma: no cover - executed only when dependency is available
@@ -249,7 +250,7 @@ class ConstructionAIAgentConfig:
             local_llm_model=local_llm_model,
             local_llm_api_key=local_llm_api_key,
             google_service_account_path=os.getenv("GOOGLE_SERVICE_ACCOUNT_PATH") or os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE"),
-            google_sheet_id=os.getenv("GOOGLE_SHEET_ID"),
+            google_sheet_id=os.getenv("GOOGLE_SHEET_ID") or DEFAULT_ESTIMATE_SHEET_ID,
             google_worksheet_name=worksheet_env,
             cache_db_path=os.getenv("CACHE_DB_PATH", "./cache/materials.db"),
             cache_ttl_seconds=int(os.getenv("CACHE_TTL_SECONDS", "86400")),

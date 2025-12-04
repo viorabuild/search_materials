@@ -59,7 +59,7 @@ print(result)
 - `OPENAI_API_KEY` — обязательный ключ OpenAI.
 - `LLM_MODEL` — модель LLM (по умолчанию `openai/gpt-oss-20b`, можно переопределить).
 - `GOOGLE_SERVICE_ACCOUNT_FILE` или `GOOGLE_SERVICE_ACCOUNT_JSON` — путь к файлу сервисного аккаунта.
-- `GOOGLE_SHEET_ID`, `GOOGLE_SHEET_WORKSHEET` — целевая таблица и лист.
+- `GOOGLE_SHEET_ID`, `GOOGLE_SHEET_WORKSHEET` — целевая таблица и лист. По умолчанию используется таблица для смет: `https://docs.google.com/spreadsheets/d/1wH-E6np_IMXs566B94mgAeTliPHvF41zEJvPVulbKBM/`.
 - `LOCAL_MATERIALS_CSV_PATH` — путь к локальной базе материалов (по умолчанию `./data/local_materials.csv`).
 - `ENABLE_LOCAL_MATERIAL_DB` — включает загрузку локальной базы материалов (по умолчанию `true`).
 - `ENABLE_MATERIALS_DB_ASSISTANT` — активирует помощника базы материалов и работ (по умолчанию `true`).
