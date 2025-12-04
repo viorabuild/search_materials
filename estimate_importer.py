@@ -194,9 +194,14 @@ class ExcelEstimateImporter:
 
     def _guess_description_column(self, columns: List[str], column_map: Optional[Dict[str, str]] = None, df=None) -> Optional[str]:
         """Эвристика: выбрать самую «текстовую» колонку, если описание не найдено по заголовку."""
-        if df is None:
-            return None
         excluded = set((column_map or {}).values())
+        # Без DataFrame выбираем первый не исключенный столбец
+        if df is None:
+            for col in columns:
+                if col not in excluded:
+                    return col
+            return None
+
         best_col = None
         best_score = -1
         for col in columns:
@@ -204,10 +209,14 @@ class ExcelEstimateImporter:
                 continue
             series = df[col]
             text_like = 0
+            unique_nonempty = set()
             for val in series:
-                if val is None or str(val).strip() == "":
+                if val is None:
                     continue
                 sval = str(val).strip()
+                if not sval:
+                    continue
+                unique_nonempty.add(sval)
                 # числовые значения не считаем текстом
                 try:
                     float(sval.replace(",", "."))
@@ -218,8 +227,10 @@ class ExcelEstimateImporter:
                 if len(sval) <= 2:
                     continue
                 text_like += 1
-            if text_like > best_score:
-                best_score = text_like
+            # Если нет явного текста, используем разнообразие значений
+            score = text_like if text_like > 0 else len(unique_nonempty)
+            if score > best_score:
+                best_score = score
                 best_col = col
         return best_col
 
