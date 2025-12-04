@@ -848,6 +848,147 @@
                         </div>
                     </div>
 
+                    <!-- Format AI Tab -->
+                    <div v-if="activeTab === 'formatAI'" class="space-y-4">
+                        <h2 class="text-2xl font-bold text-gray-800 mb-2">
+                            🪄 Формат AI — привести смету к нашему формату
+                        </h2>
+                        <p class="text-gray-600 mb-4">
+                            Укажите исходную Google-таблицу со сметой, агент сам определит колонки и создаст листы в формате VIORA.
+                        </p>
+
+                        <div class="grid md:grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-2">
+                                    Ссылка или ID таблицы
+                                </label>
+                                <input
+                                    v-model="estimateFormat.source"
+                                    type="text"
+                                    class="w-full border border-gray-300 rounded-lg p-3"
+                                    placeholder="https://docs.google.com/spreadsheets/d/..."
+                                >
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-2">
+                                    Лист-источник (опционально)
+                                </label>
+                                <input
+                                    v-model="estimateFormat.worksheet"
+                                    type="text"
+                                    class="w-full border border-gray-300 rounded-lg p-3"
+                                    placeholder="Raw Estimate"
+                                >
+                            </div>
+                        </div>
+
+                        <div class="grid md:grid-cols-3 gap-4">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-2">Название сметы</label>
+                                <input
+                                    v-model="estimateFormat.name"
+                                    type="text"
+                                    class="w-full border border-gray-300 rounded-lg p-3"
+                                    placeholder="Импорт сметы"
+                                >
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-2">Клиент</label>
+                                <input
+                                    v-model="estimateFormat.clientName"
+                                    type="text"
+                                    class="w-full border border-gray-300 rounded-lg p-3"
+                                    placeholder="ООО Клиент"
+                                >
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-2">Описание</label>
+                                <input
+                                    v-model="estimateFormat.description"
+                                    type="text"
+                                    class="w-full border border-gray-300 rounded-lg p-3"
+                                    placeholder="Краткое описание"
+                                >
+                            </div>
+                        </div>
+
+                        <div class="grid md:grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-2">
+                                    Базовое название листов (опционально)
+                                </label>
+                                <input
+                                    v-model="estimateFormat.worksheetName"
+                                    type="text"
+                                    class="w-full border border-gray-300 rounded-lg p-3"
+                                    placeholder="Import 01"
+                                >
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-2">
+                                    ID таблицы для результата (если нужно другое место)
+                                </label>
+                                <input
+                                    v-model="estimateFormat.targetSpreadsheetId"
+                                    type="text"
+                                    class="w-full border border-gray-300 rounded-lg p-3"
+                                    placeholder="Оставьте пустым — использовать исходную"
+                                >
+                            </div>
+                        </div>
+
+                        <div class="flex flex-wrap gap-4 items-center">
+                            <label class="inline-flex items-center space-x-2">
+                                <input type="checkbox" v-model="estimateFormat.createSheet" class="h-4 w-4 text-blue-600">
+                                <span class="text-sm text-gray-700">Создать листы в формате VIORA</span>
+                            </label>
+                            <label class="inline-flex items-center space-x-2">
+                                <input type="checkbox" v-model="estimateFormat.createNewSpreadsheet" class="h-4 w-4 text-blue-600">
+                                <span class="text-sm text-gray-700">Создать новую таблицу</span>
+                            </label>
+                        </div>
+
+                        <button
+                            @click="formatEstimate"
+                            :disabled="loading || !estimateFormat.source.trim()"
+                            class="bg-purple-600 text-white px-6 py-3 rounded-lg hover:bg-purple-700 disabled:bg-gray-400 transition-colors"
+                        >
+                            <i class="fas fa-wand-magic-sparkles mr-2"></i>
+                            Запустить Формат AI
+                        </button>
+
+                        <div v-if="estimateFormatResult" class="result-box">
+                            <template v-if="estimateFormatResult.error">
+                                <div class="text-red-600 font-semibold">
+                                    Ошибка: {{ estimateFormatResult.error }}
+                                </div>
+                            </template>
+                            <template v-else>
+                                <div class="space-y-2">
+                                    <div class="font-semibold text-gray-800">
+                                        Смета: {{ estimateFormatResult.estimate.metadata.name }}
+                                    </div>
+                                    <div class="text-sm text-gray-600">
+                                        Позиции: {{ estimateFormatResult.estimate.summary.items_count }}
+                                        · Итог: {{ estimateFormatResult.estimate.summary.total }}
+                                    </div>
+                                    <div v-if="estimateFormatResult.sheets && estimateFormatResult.sheets.length" class="space-y-1">
+                                        <div class="font-semibold text-gray-800 mt-2">Созданные листы:</div>
+                                        <div
+                                            v-for="(sheet, idx) in estimateFormatResult.sheets"
+                                            :key="'format-sheet-' + idx"
+                                            class="flex items-center space-x-2 text-blue-700"
+                                        >
+                                            <i class="fas fa-link"></i>
+                                            <a :href="sheet.url" target="_blank" class="underline">{{ sheet.title }}</a>
+                                            <span class="text-gray-600">— {{ sheet.spreadsheet_title }}</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+
                     <!-- Estimate Check Tab -->
                     <div v-if="activeTab === 'estimate'" class="space-y-4">
                         <h2 class="text-2xl font-bold text-gray-800 mb-4">
@@ -1073,6 +1214,7 @@
                         { id: 'batch', name: 'Пакетный поиск', icon: 'fas fa-list' },
                         { id: 'sheets', name: 'Google Sheets', icon: 'fas fa-table' },
                         { id: 'estimateCreate', name: 'Создание смет', icon: 'fas fa-file-invoice' },
+                        { id: 'formatAI', name: 'Формат AI', icon: 'fas fa-wand-magic-sparkles' },
                         { id: 'estimate', name: 'Проверка смет', icon: 'fas fa-check-circle' },
                         { id: 'stats', name: 'Статистика', icon: 'fas fa-chart-bar' },
                     ],
@@ -1123,6 +1265,18 @@
                     estimateCreateMessages: [],
                     estimateCreateAssistantInput: '',
                     estimateCreateResult: null,
+                    estimateFormat: {
+                        source: '',
+                        worksheet: '',
+                        name: '',
+                        description: '',
+                        clientName: '',
+                        worksheetName: '',
+                        targetSpreadsheetId: '',
+                        createSheet: true,
+                        createNewSpreadsheet: false,
+                    },
+                    estimateFormatResult: null,
                     estimateCheck: {
                         estimateSheet: '',
                         masterSheet: '',
@@ -1132,7 +1286,7 @@
                     stats: null,
                 };
             },
-                computed: {
+            computed: {
                     sheetEmbedUrl() {
                         if (!this.stats || !this.stats.sheet) {
                             return null;
@@ -1773,6 +1927,46 @@
                         }
                     } catch (error) {
                         this.estimateResult = `Ошибка: ${error.message}`;
+                    } finally {
+                        this.loading = false;
+                    }
+                },
+                extractSheetId(raw) {
+                    if (!raw) return '';
+                    const urlPattern = /https:\/\/docs\.google\.com\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/;
+                    const match = raw.match(urlPattern);
+                    if (match && match[1]) return match[1];
+                    return raw.trim();
+                },
+                async formatEstimate() {
+                    this.loading = true;
+                    this.estimateFormatResult = null;
+                    try {
+                        const payload = {
+                            google_sheet_id: this.extractSheetId(this.estimateFormat.source),
+                            google_worksheet: this.estimateFormat.worksheet || undefined,
+                            name: this.estimateFormat.name || undefined,
+                            description: this.estimateFormat.description || undefined,
+                            client_name: this.estimateFormat.clientName || undefined,
+                            create_sheet: this.estimateFormat.createSheet,
+                            create_new_spreadsheet: this.estimateFormat.createNewSpreadsheet,
+                            worksheet_name: this.estimateFormat.worksheetName || undefined,
+                            target_spreadsheet_id: this.estimateFormat.targetSpreadsheetId || undefined,
+                        };
+
+                        const response = await fetch('/api/estimate/import', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(payload),
+                        });
+                        const data = await response.json();
+                        if (data.success) {
+                            this.estimateFormatResult = data.estimate;
+                        } else {
+                            this.estimateFormatResult = { error: data.error || 'Не удалось отформатировать смету' };
+                        }
+                    } catch (error) {
+                        this.estimateFormatResult = { error: error.message };
                     } finally {
                         this.loading = false;
                     }

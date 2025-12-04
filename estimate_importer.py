@@ -98,7 +98,7 @@ class ExcelEstimateImporter:
         default_item_type: ItemType | str = ItemType.WORK,
     ) -> Estimate:
         """Импорт из DataFrame (Excel/Google Sheets)."""
-        mapping = self._build_mapping(list(df.columns), column_map=column_map)
+        mapping = self._build_mapping(list(df.columns), df=df, column_map=column_map)
         items = self._rows_to_items(df, mapping, default_item_type=default_item_type)
 
         estimate_name = name or "Estimate Import"
@@ -157,7 +157,7 @@ class ExcelEstimateImporter:
     def _normalize(self, value: Any) -> str:
         return str(value).strip().lower()
 
-    def _build_mapping(self, columns: List[str], column_map: Optional[Dict[str, str]]) -> Dict[str, str]:
+    def _build_mapping(self, columns: List[str], column_map: Optional[Dict[str, str]], df=None) -> Dict[str, str]:
         mapping: Dict[str, str] = {}
         normalized = {col: self._normalize(col) for col in columns}
 
@@ -184,9 +184,44 @@ class ExcelEstimateImporter:
                 mapping[field] = match
 
         if "description" not in mapping:
-            raise ValueError("Не найдена колонка с описанием (description). Добавьте column_map.")
+            guessed = self._guess_description_column(columns, column_map, df=df)
+            if guessed:
+                mapping["description"] = guessed
+            else:
+                raise ValueError("Не найдена колонка с описанием (description). Добавьте column_map.")
 
         return mapping
+
+    def _guess_description_column(self, columns: List[str], column_map: Optional[Dict[str, str]] = None, df=None) -> Optional[str]:
+        """Эвристика: выбрать самую «текстовую» колонку, если описание не найдено по заголовку."""
+        if df is None:
+            return None
+        excluded = set((column_map or {}).values())
+        best_col = None
+        best_score = -1
+        for col in columns:
+            if col in excluded:
+                continue
+            series = df[col]
+            text_like = 0
+            for val in series:
+                if val is None or str(val).strip() == "":
+                    continue
+                sval = str(val).strip()
+                # числовые значения не считаем текстом
+                try:
+                    float(sval.replace(",", "."))
+                    continue
+                except Exception:
+                    pass
+                # короткие коды тоже пропустим
+                if len(sval) <= 2:
+                    continue
+                text_like += 1
+            if text_like > best_score:
+                best_score = text_like
+                best_col = col
+        return best_col
 
     def _to_float(self, value: Any) -> float:
         if value is None:
