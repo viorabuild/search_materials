@@ -430,6 +430,59 @@ def create_estimate():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/estimate/import', methods=['POST'])
+def import_estimate():
+    """
+    Импортировать Excel-смету в наш формат.
+
+    Body:
+    {
+        "path": "./data/sample.xlsx",
+        "sheet_name": "Sheet1",
+        "column_map": {"description": "Описание", "quantity": "Qty"},
+        "name": "Объект",
+        "description": "Ремонт квартиры",
+        "client_name": "Клиент",
+        "currency": "€",
+        "skip_rows": 0,
+        "create_sheet": true,
+        "worksheet_name": "Import 01"
+    }
+    """
+    if not agent:
+        return jsonify({'error': 'Agent not initialized'}), 500
+
+    try:
+        data = request.get_json() or {}
+        path = data.get('path')
+        if not path:
+            return jsonify({'error': 'path is required'}), 400
+
+        estimate_data = agent.import_estimate_from_excel(
+            path=path,
+            sheet_name=data.get('sheet_name'),
+            column_map=data.get('column_map'),
+            name=data.get('name'),
+            description=data.get('description', ""),
+            client_name=data.get('client_name', ""),
+            currency=data.get('currency', "€"),
+            skip_rows=int(data.get('skip_rows', 0)),
+            default_item_type=data.get('default_item_type', "work"),
+            create_sheet=bool(data.get('create_sheet', False)),
+            worksheet_name=data.get('worksheet_name'),
+        )
+
+        return jsonify({
+            'success': True,
+            'estimate': estimate_data,
+            'sheets': estimate_data.get('sheets'),
+            'timestamp': datetime.now().isoformat(),
+        })
+    except Exception as e:
+        logger.error("Error importing estimate: %s", e)
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/estimate/assistant', methods=['POST'])
 def estimate_assistant():
     """ИИ-помощник для пошагового составления сметы."""

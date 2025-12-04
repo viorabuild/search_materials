@@ -20,6 +20,8 @@ pydantic>=2.9
 tenacity>=9.0
 tabulate>=0.9
 python-dotenv>=1.0
+pandas>=2.2
+openpyxl>=3.1
 
 # Observability
 prometheus_client>=0.20

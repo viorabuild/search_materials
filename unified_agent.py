@@ -51,11 +51,13 @@ from material_price_agent import (
     SearchTimeoutError,
 )
 from estimate_constructor import (
+    Estimate,
     EstimateConstructor,
     EstimateItem,
     ItemType,
     create_quick_estimate,
 )
+from estimate_importer import ExcelEstimateImporter
 from cache_manager import CacheManager
 from markdown_ai import GoogleSheetsAI
 from local_materials_db import LocalMaterialDatabase
@@ -342,6 +344,7 @@ class ConstructionAIAgent:
         )
 
         self.estimate_constructor: Optional[EstimateConstructor] = None
+        self.estimate_importer: Optional[ExcelEstimateImporter] = None
         if self.config.enable_estimate_constructor:
             try:
                 storage_path = Path(self.config.estimate_storage_path)
@@ -352,6 +355,7 @@ class ConstructionAIAgent:
                     material_agent=self.material_agent,
                     storage_path=storage_path,
                 )
+                self.estimate_importer = ExcelEstimateImporter(self.estimate_constructor)
                 logger.info("Estimate Constructor initialized (storage=%s)", storage_path)
             except Exception as exc:
                 logger.warning("Failed to initialize Estimate Constructor: %s", exc)
@@ -1315,39 +1319,21 @@ class ConstructionAIAgent:
             worksheet = sheets_ai.spreadsheet.add_worksheet(title=title, rows=rows, cols=cols)
         return worksheet
 
-    def _create_estimate_sheet(
+    def _build_estimate_rows(
         self,
-        sheet_title: str,
-        name: str,
-        description: str,
-        client_name: str,
-        text_input: str,
-        sheets_ai: GoogleSheetsAI,
-    ) -> Dict[str, Any]:
-        """Создать лист Google Sheets с оформленной сметой."""
-        if not sheets_ai:
-            raise RuntimeError("Google Sheets AI is not configured for this spreadsheet")
-
-        language = self._detect_language(name, description, client_name, text_input)
-        table_data = self._generate_estimate_table_data(
-            name=name,
-            description=description,
-            client_name=client_name,
-            text_input=text_input,
-            variant_label=sheet_title,
-        )
-        labels = table_data.get("labels") or self._labels_for_language(language)
-        items: List[Dict[str, Any]] = table_data.get("items") or []
-        notes: List[str] = table_data.get("notes") or []
-        iva_percent = self._to_float(table_data.get("iva_percent") or 23)
-
+        items: List[Dict[str, Any]],
+        labels: Dict[str, str],
+        iva_percent: float,
+        section_title: str,
+        notes: Optional[List[str]] = None,
+    ) -> tuple[List[List[Any]], int, int, int]:
+        """Сформировать строки таблицы сметы в стандартном формате."""
         rows: List[List[Any]] = []
         rows.append(["", "", "", "", "", ""])
         rows.append([labels["brand"], "", "", "", "", ""])
         rows.append([labels["works_title"], "", "", "", "", ""])
         rows.append([labels["col_num"], labels["col_desc"], labels["col_unit"], labels["col_qty"], labels["col_price"], labels["col_total"]])
 
-        section_title = table_data.get("section_title") or labels["section"]
         rows.append(["1", section_title, "", "", "", ""])
 
         first_item_row = len(rows) + 1
@@ -1357,7 +1343,7 @@ class ConstructionAIAgent:
             price = self._to_float(item.get("unit_price"))
             rows.append([
                 item.get("number") or "",
-                item.get("description") or "",
+                item.get("description") or item.get("name") or "",
                 item.get("unit") or "",
                 qty if qty else "",
                 price if price else "",
@@ -1367,7 +1353,7 @@ class ConstructionAIAgent:
 
         rows.append(["", "", "", "", "", ""])
         subtotal_row = len(rows) + 1
-        last_item_row = current_row_index - 1
+        last_item_row = max(first_item_row, current_row_index - 1)
         rows.append(["", "TOTAL", "", "", "", f"=SUM(F{first_item_row}:F{last_item_row})"])
         vat_row = len(rows) + 1
         rows.append(["", f"{labels.get('vat_label', 'IVA')} {iva_percent:.0f}%", "", "", "", f"=F{subtotal_row}*{iva_percent/100:.4f}"])
@@ -1379,10 +1365,16 @@ class ConstructionAIAgent:
             for note in notes:
                 rows.append(["", note, "", "", "", ""])
 
-        row_count = max(40, len(rows) + 15)
-        worksheet = self._prepare_worksheet(sheets_ai, sheet_title, row_count, 8)
-        worksheet.update("A1", rows, value_input_option="USER_ENTERED")
+        return rows, first_item_row, last_item_row, total_with_vat_row
 
+    def _apply_estimate_sheet_formatting(
+        self,
+        sheets_ai: GoogleSheetsAI,
+        worksheet: gspread.Worksheet,
+        items_count: int,
+        rows_len: int,
+    ) -> None:
+        """Применить фирменное форматирование к листу сметы."""
         try:
             header_color = {"red": 0.043, "green": 0.188, "blue": 0.18}
             sheets_ai.spreadsheet.batch_update({
@@ -1428,7 +1420,7 @@ class ConstructionAIAgent:
                 {"backgroundColor": header_color, "textColor": {"red": 1, "green": 1, "blue": 1}, "bold": True, "fontFamily": "Calibri"},
                 worksheet_name=worksheet.title,
             )
-            total_start = len(items) + 7
+            total_start = items_count + 7
             sheets_ai.format_range(
                 f"E{total_start}:F{total_start+2}",
                 {"bold": True, "fontFamily": "Calibri"},
@@ -1440,17 +1432,114 @@ class ConstructionAIAgent:
                 worksheet_name=worksheet.title,
             )
             sheets_ai.format_range(
-                f"A1:F{len(rows)}",
+                f"A1:F{rows_len}",
                 {"fontFamily": "Calibri"},
                 worksheet_name=worksheet.title,
             )
             sheets_ai.format_range(
-                f"A5:F{len(rows)}",
+                f"A5:F{rows_len}",
                 {"borders": {"style": "SOLID", "color": {"red": 0, "green": 0, "blue": 0}}},
                 worksheet_name=worksheet.title,
             )
         except Exception as exc:
             logger.warning("Failed to format estimate sheet: %s", exc)
+
+    def _create_estimate_sheet(
+        self,
+        sheet_title: str,
+        name: str,
+        description: str,
+        client_name: str,
+        text_input: str,
+        sheets_ai: GoogleSheetsAI,
+    ) -> Dict[str, Any]:
+        """Создать лист Google Sheets с оформленной сметой."""
+        if not sheets_ai:
+            raise RuntimeError("Google Sheets AI is not configured for this spreadsheet")
+
+        language = self._detect_language(name, description, client_name, text_input)
+        table_data = self._generate_estimate_table_data(
+            name=name,
+            description=description,
+            client_name=client_name,
+            text_input=text_input,
+            variant_label=sheet_title,
+        )
+        labels = table_data.get("labels") or self._labels_for_language(language)
+        items: List[Dict[str, Any]] = table_data.get("items") or []
+        notes: List[str] = table_data.get("notes") or []
+        iva_percent = self._to_float(table_data.get("iva_percent") or 23)
+
+        section_title = table_data.get("section_title") or labels["section"]
+        rows, first_item_row, last_item_row, total_with_vat_row = self._build_estimate_rows(
+            items=items,
+            labels=labels,
+            iva_percent=iva_percent,
+            section_title=section_title,
+            notes=notes,
+        )
+
+        row_count = max(40, len(rows) + 15)
+        worksheet = self._prepare_worksheet(sheets_ai, sheet_title, row_count, 8)
+        worksheet.update("A1", rows, value_input_option="USER_ENTERED")
+
+        self._apply_estimate_sheet_formatting(
+            sheets_ai=sheets_ai,
+            worksheet=worksheet,
+            items_count=len(items),
+            rows_len=len(rows),
+        )
+
+        gid = getattr(worksheet, "id", None) or worksheet._properties.get("sheetId")
+        sheet_url = f"https://docs.google.com/spreadsheets/d/{sheets_ai.spreadsheet.id}/edit#gid={gid}"
+
+        return {
+            "title": sheet_title,
+            "url": sheet_url,
+            "rows": len(rows),
+            "subtotal_formula": f"=SUM(F{first_item_row}:F{last_item_row})",
+            "total_with_iva_cell": f"F{total_with_vat_row}",
+            "sheet": sheet_title,
+        }
+
+    def _create_estimate_sheet_from_items(
+        self,
+        sheet_title: str,
+        estimate: "Estimate",
+        labels: Dict[str, str],
+        sheets_ai: GoogleSheetsAI,
+    ) -> Dict[str, Any]:
+        """Создать лист сметы по уже готовым позициям (после импорта Excel)."""
+        items_data: List[Dict[str, Any]] = []
+        for idx, item in enumerate(estimate.items, start=1):
+            items_data.append(
+                {
+                    "number": str(idx),
+                    "description": item.description or item.name,
+                    "unit": item.unit,
+                    "quantity": item.quantity,
+                    "unit_price": item.unit_price,
+                }
+            )
+
+        iva_percent = estimate.metadata.tax_percent or 23
+        rows, first_item_row, last_item_row, total_with_vat_row = self._build_estimate_rows(
+            items=items_data,
+            labels=labels,
+            iva_percent=iva_percent,
+            section_title=labels["section"],
+            notes=[estimate.metadata.notes] if estimate.metadata.notes else None,
+        )
+        row_count = max(40, len(rows) + 15)
+        worksheet = self._prepare_worksheet(sheets_ai, sheet_title, row_count, 8)
+        worksheet.update("A1", rows, value_input_option="USER_ENTERED")
+
+        self._apply_estimate_sheet_formatting(
+            sheets_ai=sheets_ai,
+            worksheet=worksheet,
+            items_count=len(items_data),
+            rows_len=len(rows),
+        )
 
         gid = getattr(worksheet, "id", None) or worksheet._properties.get("sheetId")
         sheet_url = f"https://docs.google.com/spreadsheets/d/{sheets_ai.spreadsheet.id}/edit#gid={gid}"
@@ -1642,6 +1731,106 @@ class ConstructionAIAgent:
                     info["spreadsheet_url"] = spreadsheet_url
 
                 sheet_links.extend([summary_info, estimate_info, master_info])
+
+            result["sheets"] = sheet_links
+
+        return result
+
+    def import_estimate_from_excel(
+        self,
+        path: str,
+        sheet_name: Optional[str] = None,
+        column_map: Optional[Dict[str, str]] = None,
+        name: Optional[str] = None,
+        description: str = "",
+        client_name: str = "",
+        currency: str = "€",
+        skip_rows: int = 0,
+        default_item_type: ItemType | str = ItemType.WORK,
+        create_sheet: bool = False,
+        worksheet_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Импортировать Excel-файл со сметой в наш формат.
+
+        Args:
+            path: путь к Excel.
+            sheet_name: название листа (если None — первый лист).
+            column_map: ручное сопоставление колонок {"description": "Описание работ", ...}.
+            name: имя сметы (по умолчанию имя файла).
+            description: описание проекта.
+            client_name: имя клиента.
+            currency: валюта.
+            skip_rows: пропустить первые N строк перед чтением заголовков.
+            default_item_type: тип позиций (work/material/...).
+            create_sheet: создать лист Google Sheets в фирменном формате.
+            worksheet_name: базовое название листов при создании в Google Sheets.
+        """
+        if not self.estimate_importer:
+            raise RuntimeError("Estimate importer not available")
+
+        estimate = self.estimate_importer.import_from_excel(
+            path=path,
+            sheet_name=sheet_name,
+            column_map=column_map,
+            name=name,
+            description=description,
+            client_name=client_name,
+            currency=currency,
+            skip_rows=skip_rows,
+            default_item_type=default_item_type,
+        )
+
+        result: Dict[str, Any] = {"estimate": estimate.to_dict()}
+
+        if create_sheet:
+            if not self.sheets_ai:
+                raise RuntimeError("Google Sheets AI is not configured for this spreadsheet")
+            language = self._detect_language(
+                estimate.metadata.name,
+                estimate.metadata.description,
+                estimate.metadata.client_name,
+                "",
+            )
+            labels = self._labels_for_language(language)
+            sheet_titles = self._sheet_titles_for_language(language)
+            base_title = (worksheet_name or estimate.metadata.name or "Estimate").strip() or "Estimate"
+            estimate_sheet_title = f"{sheet_titles['estimate']} — {base_title}"
+            summary_sheet_title = f"{sheet_titles['summary']} — {base_title}"
+            master_sheet_title = f"{sheet_titles['master']} — {base_title}"
+
+            estimate_info = self._create_estimate_sheet_from_items(
+                sheet_title=estimate_sheet_title,
+                estimate=estimate,
+                labels=labels,
+                sheets_ai=self.sheets_ai,
+            )
+            summary_info = self._create_summary_sheet(
+                title=summary_sheet_title,
+                estimate_sheet_title=estimate_sheet_title,
+                labels=labels,
+                total_cell=estimate_info["total_with_iva_cell"],
+                sheets_ai=self.sheets_ai,
+            )
+            master_info = self._create_master_sheet(
+                title=master_sheet_title,
+                labels=labels,
+                sheets_ai=self.sheets_ai,
+            )
+
+            sheet_links: List[Dict[str, Any]] = []
+            spreadsheet = self.sheets_ai.spreadsheet
+            spreadsheet_url = f"https://docs.google.com/spreadsheets/d/{spreadsheet.id}"
+            for info, info_type in (
+                (summary_info, "summary"),
+                (estimate_info, "estimate"),
+                (master_info, "master"),
+            ):
+                info["type"] = info_type
+                info["spreadsheet_id"] = spreadsheet.id
+                info["spreadsheet_title"] = spreadsheet.title
+                info["spreadsheet_url"] = spreadsheet_url
+                sheet_links.append(info)
 
             result["sheets"] = sheet_links
 
