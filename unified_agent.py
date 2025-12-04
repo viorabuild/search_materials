@@ -1336,12 +1336,14 @@ class ConstructionAIAgent:
             return
         border_style = {"style": "SOLID", "color": {"red": 0, "green": 0, "blue": 0}}
         border_format = {
-            "userEnteredFormat": {
-                "borders": {
-                    "top": dict(border_style),
-                    "bottom": dict(border_style),
-                    "left": dict(border_style),
-                    "right": dict(border_style),
+            "cell": {
+                "userEnteredFormat": {
+                    "borders": {
+                        "top": dict(border_style),
+                        "bottom": dict(border_style),
+                        "left": dict(border_style),
+                        "right": dict(border_style),
+                    }
                 }
             },
             "fields": "userEnteredFormat.borders",
