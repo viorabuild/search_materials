@@ -543,8 +543,8 @@ def check_estimate():
     try:
         data = request.get_json()
         estimate_sheet = data.get('estimate_sheet')
-        master_sheet = data.get('master_sheet', 'Master List')
-        quantity_col = data.get('quantity_col', 'F')
+        master_sheet = data.get('master_sheet') or data.get('master')
+        quantity_col = data.get('quantity_col') or data.get('qty_col')
         
         logger.info("Checking estimate")
         result = agent.check_estimate(estimate_sheet, master_sheet, quantity_col)

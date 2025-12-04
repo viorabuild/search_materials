@@ -1993,16 +1993,16 @@ class ConstructionAIAgent:
     def check_estimate(
         self,
         estimate_sheet: str = None,
-        master_sheet: str = "Master List",
-        quantity_col: str = "F",
+        master_sheet: Optional[str] = "Master List",
+        quantity_col: Optional[str] = None,
     ) -> str:
         """
         Проверить строительную смету.
         
         Args:
             estimate_sheet: Название листа со сметой
-            master_sheet: Название листа с мастер-листом
-            quantity_col: Колонка с количеством
+            master_sheet: Название листа с мастер-листом (можно не указывать)
+            quantity_col: Колонка с количеством (если None — определим автоматически)
         
         Returns:
             Отчет о проверке
@@ -2016,10 +2016,16 @@ class ConstructionAIAgent:
 
             try:
                 estimate_worksheet = self.sheets_ai.spreadsheet.worksheet(estimate_sheet)
-                master_worksheet = self.sheets_ai.spreadsheet.worksheet(master_sheet)
-
                 estimate_data = estimate_worksheet.get_all_values()
-                master_data = master_worksheet.get_all_values()
+
+                master_data: List[List[str]] = []
+                if master_sheet:
+                    try:
+                        master_worksheet = self.sheets_ai.spreadsheet.worksheet(master_sheet)
+                        master_data = master_worksheet.get_all_values()
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("Master sheet '%s' not found, продолжаем без него: %s", master_sheet, exc)
+                        master_data = []
 
                 result = self.sheets_ai.estimate_checker.validate_estimate(
                     estimate_data,

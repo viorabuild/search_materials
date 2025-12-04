@@ -84,25 +84,63 @@ class EstimateChecker:
         next_num = max_num + 1
         return f"{prefix}-{next_num:03d}"
     
+    def detect_quantity_column(self, estimate_data: List[List[str]]) -> str:
+        """Автоопределение колонки количества по заголовкам и числовым значениям."""
+        if not estimate_data:
+            return "F"
+
+        header = estimate_data[0]
+        normalized = [str(h).strip().lower() for h in header]
+        keywords = ("qty", "quantity", "кол", "кол-во", "qtd", "quantidade", "количество")
+        for idx, text in enumerate(normalized):
+            if any(key in text for key in keywords):
+                return chr(ord('A') + idx)
+
+        max_cols = max(len(r) for r in estimate_data)
+        best_idx = 5  # default to column F if ничего не найдено
+        best_score = -1
+
+        for idx in range(max_cols):
+            numeric_nonzero = 0
+            for row in estimate_data[1:]:
+                if len(row) <= idx:
+                    continue
+                val = row[idx]
+                if val is None or str(val).strip() == "":
+                    continue
+                try:
+                    if float(str(val).replace(",", ".").replace(" ", "")) != 0:
+                        numeric_nonzero += 1
+                except Exception:
+                    continue
+            if numeric_nonzero > best_score:
+                best_score = numeric_nonzero
+                best_idx = idx
+
+        return chr(ord('A') + best_idx)
+
     def validate_estimate(
         self, 
         estimate_data: List[List[str]], 
-        master_data: List[List[str]],
-        quantity_col: str = 'F'
+        master_data: Optional[List[List[str]]],
+        quantity_col: Optional[str] = 'F'
     ) -> ValidationResult:
         """
         Проверка сметы на соответствие мастер-листу
         
         Args:
             estimate_data: Данные сметы
-            master_data: Данные мастер-листа
-            quantity_col: Буква колонки с количеством
+            master_data: Данные мастер-листа (может быть пустым)
+            quantity_col: Буква колонки с количеством (если None — автоопределение)
         
         Returns:
             ValidationResult с результатами проверки
         """
+        master_data = master_data or []
+
         # Преобразуем букву колонки в индекс (A=0, B=1, ...)
-        qty_idx = ord(quantity_col.upper()) - ord('A')
+        use_col = quantity_col or self.detect_quantity_column(estimate_data)
+        qty_idx = max(0, ord(use_col.upper()) - ord('A'))
         
         # Извлекаем коды из мастер-листа (колонка A)
         master_codes = set()
