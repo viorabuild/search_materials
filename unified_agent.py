@@ -157,7 +157,7 @@ class ConstructionAIAgentConfig:
     
     # OpenAI
     openai_api_key: Optional[str] = None
-    llm_model: str = "gpt-5-nano"
+    llm_model: str = "openai/gpt-oss-20b"
     temperature: float = 1.0
     llm_request_timeout: Optional[float] = None
     enable_local_llm: bool = False
@@ -212,7 +212,7 @@ class ConstructionAIAgentConfig:
         """Создать конфигурацию из переменных окружения."""
         use_chatgpt_search = os.getenv("USE_CHATGPT_SEARCH", "false").lower() == "true"
         enable_web_search = os.getenv("ENABLE_WEB_SEARCH", "false").lower() == "true"
-        llm_model = os.getenv("LLM_MODEL", "gpt-5-nano")
+        llm_model = os.getenv("LLM_MODEL", "openai/gpt-oss-20b")
         temperature = float(os.getenv("LLM_TEMPERATURE", "1.0"))
         
         if llm_model.startswith("gpt-5-nano") and temperature != 1.0:

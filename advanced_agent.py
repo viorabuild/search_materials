@@ -72,7 +72,7 @@ class AdvancedMaterialAgent:
     
     openai_api_key: Optional[str] = None
     openai_client: Optional[Any] = None
-    model_name: str = "gpt-5-nano"
+    model_name: str = "openai/gpt-oss-20b"
     temperature: float = 1.0
     use_bing: bool = False
     bing_api_key: Optional[str] = None
