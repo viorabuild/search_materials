@@ -127,9 +127,7 @@ class ExcelEstimateImporter:
         else:
             df = excel
 
-        df = df.dropna(how="all").copy()
-        df.columns = [str(col).strip() for col in df.columns]
-        return df
+        return self._normalize_headers_and_rows(df)
 
     def dataframe_from_values(self, headers: List[str], rows: List[List[Any]]):
         """Построить DataFrame из "сырых" строк (например, Google Sheets)."""
@@ -150,9 +148,30 @@ class ExcelEstimateImporter:
                 current = current[:max_cols]
             padded_rows.append(current)
         df = pd.DataFrame(padded_rows, columns=headers)
-        df = df.dropna(how="all").copy()
-        df.columns = [str(col).strip() for col in df.columns]
-        return df
+        return self._normalize_headers_and_rows(df)
+
+    def _normalize_headers_and_rows(self, df):
+        """Сдвинуть заголовок на первую непустую строку и привести названия колонок."""
+        # Найдём первую строку, где есть непустые значения
+        header_idx = None
+        for idx, row in df.iterrows():
+            has_value = any(str(v).strip() for v in row.values if v is not None)
+            if has_value:
+                header_idx = idx
+                break
+
+        if header_idx is None:
+            df = df.dropna(how="all")
+            df.columns = [str(col).strip() for col in df.columns]
+            return df
+
+        header = [str(col).strip() for col in df.iloc[header_idx].tolist()]
+        data_rows = df.iloc[header_idx + 1:].copy()
+        data_rows = data_rows.reset_index(drop=True)
+        data_rows.columns = header
+        data_rows = data_rows.dropna(how="all")
+        data_rows.columns = [str(col).strip() for col in data_rows.columns]
+        return data_rows
 
     def _normalize(self, value: Any) -> str:
         return str(value).strip().lower()
@@ -188,15 +207,19 @@ class ExcelEstimateImporter:
             if guessed:
                 mapping["description"] = guessed
             else:
-                raise ValueError("Не найдена колонка с описанием (description). Добавьте column_map.")
+                # финальный fallback: первая доступная колонка
+                for col in columns:
+                    if col not in (column_map or {}).values():
+                        mapping["description"] = col
+                        break
 
         return mapping
 
     def _guess_description_column(self, columns: List[str], column_map: Optional[Dict[str, str]] = None, df=None) -> Optional[str]:
         """Эвристика: выбрать самую «текстовую» колонку, если описание не найдено по заголовку."""
         excluded = set((column_map or {}).values())
-        # Без DataFrame выбираем первый не исключенный столбец
-        if df is None:
+        # Без DataFrame или без данных выбираем первый не исключенный столбец
+        if df is None or getattr(df, "empty", False):
             for col in columns:
                 if col not in excluded:
                     return col

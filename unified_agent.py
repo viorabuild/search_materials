@@ -1658,6 +1658,25 @@ class ConstructionAIAgent:
         except Exception:
             return None, ref, None
 
+    def _load_sheet_values(self, sheet_id: str, worksheet_name: Optional[str], worksheet_gid: Optional[int] = None) -> List[List[str]]:
+        client = self._ensure_gspread_client()
+        spreadsheet = client.open_by_key(sheet_id)
+        if worksheet_gid is not None:
+            worksheet = spreadsheet.get_worksheet_by_id(worksheet_gid)
+        elif worksheet_name:
+            worksheet = spreadsheet.worksheet(worksheet_name)
+        else:
+            worksheet = spreadsheet.sheet1
+        return worksheet.get_all_values()
+
+    def get_sheet_headers(self, sheet_id: str, worksheet_name: Optional[str] = None, worksheet_gid: Optional[int] = None) -> List[str]:
+        """Вернуть первую непустую строку листа как заголовки."""
+        values = self._load_sheet_values(sheet_id, worksheet_name, worksheet_gid)
+        for row in values:
+            if any(str(cell).strip() for cell in row):
+                return [str(cell).strip() for cell in row]
+        return []
+
     def _create_summary_sheet(
         self,
         title: str,

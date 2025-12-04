@@ -506,6 +506,33 @@ def import_estimate():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/estimate/headers', methods=['POST'])
+def estimate_headers():
+    """
+    Получить заголовки листа (первая непустая строка) для подсказки колонок.
+    Body:
+    {
+        "google_sheet_id": "...",
+        "google_worksheet": "Sheet1"
+    }
+    """
+    if not agent:
+        return jsonify({'error': 'Agent not initialized'}), 500
+
+    try:
+        data = request.get_json() or {}
+        sheet_id = data.get('google_sheet_id') or data.get('sheet_id')
+        worksheet_name = data.get('google_worksheet') or data.get('worksheet')
+        if not sheet_id:
+            return jsonify({'error': 'google_sheet_id is required'}), 400
+
+        headers = agent.get_sheet_headers(sheet_id=sheet_id, worksheet_name=worksheet_name)
+        return jsonify({'success': True, 'headers': headers})
+    except Exception as e:
+        logger.error("Error fetching headers: %s", e)
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/estimate/assistant', methods=['POST'])
 def estimate_assistant():
     """ИИ-помощник для пошагового составления сметы."""
