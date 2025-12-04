@@ -1321,6 +1321,35 @@ class ConstructionAIAgent:
             worksheet = sheets_ai.spreadsheet.add_worksheet(title=title, rows=rows, cols=cols)
         return worksheet
 
+    def _column_letter(self, idx: int) -> str:
+        """Преобразовать индекс колонки (1-based) в букву (A, B, ...)."""
+        result = ""
+        while idx > 0:
+            idx, rem = divmod(idx - 1, 26)
+            result = chr(65 + rem) + result
+        return result
+
+    def _apply_borders_only(self, sheets_ai: GoogleSheetsAI, worksheet: gspread.Worksheet, values: List[List[Any]]) -> None:
+        """Применить рамки к диапазону с данными, не трогая содержимое."""
+        max_row = 0
+        max_col = 0
+        for r_idx, row in enumerate(values, start=1):
+            if any(str(c).strip() for c in row):
+                max_row = max(max_row, r_idx)
+                max_col = max(max_col, max((idx + 1 for idx, c in enumerate(row) if str(c).strip()), default=0))
+        if max_row == 0 or max_col == 0:
+            return
+        end_col_letter = self._column_letter(max_col)
+        data_range = f"A1:{end_col_letter}{max_row}"
+        try:
+            sheets_ai.format_range(
+                data_range,
+                {"borders": {"style": "SOLID", "color": {"red": 0, "green": 0, "blue": 0}}},
+                worksheet_name=worksheet.title,
+            )
+        except Exception as exc:
+            logger.warning("Failed to apply borders to %s: %s", data_range, exc)
+
     def _build_estimate_rows(
         self,
         items: List[Dict[str, Any]],
@@ -1511,43 +1540,58 @@ class ConstructionAIAgent:
         labels: Dict[str, str],
         sheets_ai: GoogleSheetsAI,
         existing_worksheet: Optional[gspread.Worksheet] = None,
+        raw_values: Optional[List[List[Any]]] = None,
     ) -> Dict[str, Any]:
         """Создать лист сметы по уже готовым позициям (после импорта Excel)."""
-        items_data: List[Dict[str, Any]] = []
-        for idx, item in enumerate(estimate.items, start=1):
-            items_data.append(
-                {
-                    "number": str(idx),
-                    "description": item.description or item.name,
-                    "unit": item.unit,
-                    "quantity": item.quantity,
-                    "unit_price": item.unit_price,
-                }
+        if raw_values is not None:
+            rows = raw_values
+            row_count = max(40, len(rows) + 5)
+            worksheet = existing_worksheet or self._prepare_worksheet(sheets_ai, sheet_title, row_count, max(len(r) for r in rows) if rows else 8)
+            if existing_worksheet:
+                try:
+                    existing_worksheet.clear()
+                except Exception:
+                    pass
+            worksheet.update("A1", rows, value_input_option="USER_ENTERED")
+            first_item_row = 1
+            last_item_row = len(rows)
+            total_with_vat_row = len(rows)
+        else:
+            items_data: List[Dict[str, Any]] = []
+            for idx, item in enumerate(estimate.items, start=1):
+                items_data.append(
+                    {
+                        "number": str(idx),
+                        "description": item.description or item.name,
+                        "unit": item.unit,
+                        "quantity": item.quantity,
+                        "unit_price": item.unit_price,
+                    }
+                )
+
+            iva_percent = estimate.metadata.tax_percent or 23
+            rows, first_item_row, last_item_row, total_with_vat_row = self._build_estimate_rows(
+                items=items_data,
+                labels=labels,
+                iva_percent=iva_percent,
+                section_title=labels["section"],
+                notes=[estimate.metadata.notes] if estimate.metadata.notes else None,
             )
+            row_count = max(40, len(rows) + 15)
+            worksheet = existing_worksheet or self._prepare_worksheet(sheets_ai, sheet_title, row_count, 8)
+            if existing_worksheet:
+                try:
+                    existing_worksheet.clear()
+                except Exception:
+                    pass
+            worksheet.update("A1", rows, value_input_option="USER_ENTERED")
 
-        iva_percent = estimate.metadata.tax_percent or 23
-        rows, first_item_row, last_item_row, total_with_vat_row = self._build_estimate_rows(
-            items=items_data,
-            labels=labels,
-            iva_percent=iva_percent,
-            section_title=labels["section"],
-            notes=[estimate.metadata.notes] if estimate.metadata.notes else None,
-        )
-        row_count = max(40, len(rows) + 15)
-        worksheet = existing_worksheet or self._prepare_worksheet(sheets_ai, sheet_title, row_count, 8)
-        if existing_worksheet:
-            try:
-                existing_worksheet.clear()
-            except Exception:
-                pass
-        worksheet.update("A1", rows, value_input_option="USER_ENTERED")
-
-        self._apply_estimate_sheet_formatting(
-            sheets_ai=sheets_ai,
-            worksheet=worksheet,
-            items_count=len(items_data),
-            rows_len=len(rows),
-        )
+            self._apply_estimate_sheet_formatting(
+                sheets_ai=sheets_ai,
+                worksheet=worksheet,
+                items_count=len(items_data),
+                rows_len=len(rows),
+            )
 
         gid = getattr(worksheet, "id", None) or worksheet._properties.get("sheetId")
         sheet_url = f"https://docs.google.com/spreadsheets/d/{sheets_ai.spreadsheet.id}/edit#gid={gid}"
@@ -1570,6 +1614,7 @@ class ConstructionAIAgent:
         target_spreadsheet_id: Optional[str] = None,
         existing_spreadsheet: Optional[gspread.Spreadsheet] = None,
         existing_worksheet: Optional[gspread.Worksheet] = None,
+        raw_values: Optional[List[List[Any]]] = None,
     ) -> List[Dict[str, Any]]:
         """Создать листы Estimate/Summary/Master в нужном формате."""
         labels = self._labels_for_language(language)
@@ -1612,6 +1657,7 @@ class ConstructionAIAgent:
                 labels=labels,
                 sheets_ai=temp_ai,
                 existing_worksheet=existing_worksheet,
+                raw_values=raw_values,
             )
         else:
             estimate_info = self._create_estimate_sheet_from_items(
@@ -1619,6 +1665,7 @@ class ConstructionAIAgent:
                 estimate=estimate,
                 labels=labels,
                 sheets_ai=temp_ai,
+                raw_values=raw_values,
             )
 
         spreadsheet_url = f"https://docs.google.com/spreadsheets/d/{spreadsheet.id}"
@@ -1925,6 +1972,8 @@ class ConstructionAIAgent:
         create_sheet: bool = True,
         create_new_spreadsheet: bool = False,
         target_spreadsheet_id: Optional[str] = None,
+        rewrite_source_sheet: bool = False,
+        **_: Any,
     ) -> Dict[str, Any]:
         """
         Импортировать необработанную смету из Google Sheets и переложить в наш формат.
@@ -1999,15 +2048,28 @@ class ConstructionAIAgent:
                 "",
             )
             base_title = name or worksheet.title
-            sheet_links = self._render_estimate_to_sheets(
-                estimate=estimate,
-                base_title=base_title,
-                language=language,
-                create_new_spreadsheet=create_new_spreadsheet,
-                target_spreadsheet_id=target_spreadsheet_id or (None if create_new_spreadsheet else spreadsheet.id),
-                existing_spreadsheet=spreadsheet if rewrite_source_sheet and not create_new_spreadsheet else None,
-                existing_worksheet=worksheet if rewrite_source_sheet and not create_new_spreadsheet else None,
-            )
+            if rewrite_source_sheet:
+                sheet_links = self._render_estimate_to_sheets(
+                    estimate=estimate,
+                    base_title=base_title,
+                    language=language,
+                    create_new_spreadsheet=create_new_spreadsheet,
+                    target_spreadsheet_id=target_spreadsheet_id or (None if create_new_spreadsheet else spreadsheet.id),
+                    existing_spreadsheet=spreadsheet if not create_new_spreadsheet else None,
+                    existing_worksheet=worksheet if not create_new_spreadsheet else None,
+                )
+            else:
+                # Только формат: добавить рамки на существующий диапазон, данные не трогаем
+                self._apply_borders_only(self.sheets_ai, worksheet, values)
+                sheet_links = [{
+                    "type": "estimate",
+                    "title": worksheet.title,
+                    "sheet": worksheet.title,
+                    "url": f"https://docs.google.com/spreadsheets/d/{spreadsheet.id}/edit#gid={worksheet.id}",
+                    "spreadsheet_id": spreadsheet.id,
+                    "spreadsheet_title": spreadsheet.title,
+                    "spreadsheet_url": f"https://docs.google.com/spreadsheets/d/{spreadsheet.id}",
+                }]
             result["sheets"] = sheet_links
 
         return result

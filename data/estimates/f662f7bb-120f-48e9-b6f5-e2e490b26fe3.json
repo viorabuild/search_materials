@@ -1,0 +1,59 @@
+{
+  "metadata": {
+    "id": "f662f7bb-120f-48e9-b6f5-e2e490b26fe3",
+    "name": "Medições_Charneca (копия)",
+    "description": "",
+    "client_name": "",
+    "client_contact": "",
+    "project_address": "",
+    "created_at": 1764871031.043863,
+    "updated_at": 1764871031.044105,
+    "status": "draft",
+    "currency": "€",
+    "discount_percent": 0.0,
+    "tax_percent": 0.0,
+    "notes": "",
+    "template_id": null
+  },
+  "items": [
+    {
+      "id": "5a966888-d11e-4368-9cff-2ccb1cc8f34c",
+      "name": "Novembro de 2025",
+      "description": "Novembro de 2025",
+      "item_type": "work",
+      "quantity": 0.0,
+      "unit": "шт",
+      "unit_price": 0.0,
+      "total_price": 0.0,
+      "code": "",
+      "supplier": "",
+      "supplier_url": "",
+      "notes": "",
+      "created_at": 1764871031.043784,
+      "updated_at": 1764871031.043784
+    },
+    {
+      "id": "665762cd-817c-4952-a8fc-d998cb27a23b",
+      "name": "TOTAIS",
+      "description": "TOTAIS",
+      "item_type": "work",
+      "quantity": 0.0,
+      "unit": "шт",
+      "unit_price": 0.0,
+      "total_price": 0.0,
+      "code": "",
+      "supplier": "",
+      "supplier_url": "",
+      "notes": "",
+      "created_at": 1764871031.0437949,
+      "updated_at": 1764871031.0437949
+    }
+  ],
+  "summary": {
+    "subtotal": 0.0,
+    "discount": 0.0,
+    "tax": 0.0,
+    "total": 0.0,
+    "items_count": 2
+  }
+}
