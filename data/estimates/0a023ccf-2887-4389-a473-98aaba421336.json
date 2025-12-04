@@ -1,0 +1,26 @@
+{
+  "metadata": {
+    "id": "0a023ccf-2887-4389-a473-98aaba421336",
+    "name": "Лист1",
+    "description": "",
+    "client_name": "",
+    "client_contact": "",
+    "project_address": "",
+    "created_at": 1764869259.7228758,
+    "updated_at": 1764869259.7228758,
+    "status": "draft",
+    "currency": "€",
+    "discount_percent": 0.0,
+    "tax_percent": 0.0,
+    "notes": "",
+    "template_id": null
+  },
+  "items": [],
+  "summary": {
+    "subtotal": 0,
+    "discount": 0.0,
+    "tax": 0.0,
+    "total": 0.0,
+    "items_count": 0
+  }
+}

@@ -1250,7 +1250,8 @@
                     }
                     try {
                         const payload = {
-                            google_sheet_id: this.extractSheetId(this.estimateFormat.source),
+                            google_sheet_id: this.extractSheetRef(this.estimateFormat.source).id,
+                            worksheet_gid: this.extractSheetRef(this.estimateFormat.source).gid,
                         };
                         const response = await fetch('/api/estimate/headers', {
                             method: 'POST',
@@ -1887,19 +1888,24 @@
                         this.loading = false;
                     }
                 },
-                extractSheetId(raw) {
-                    if (!raw) return '';
+                extractSheetRef(raw) {
+                    if (!raw) return { id: '', gid: null };
                     const urlPattern = /https:\/\/docs\.google\.com\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/;
-                    const match = raw.match(urlPattern);
-                    if (match && match[1]) return match[1];
-                    return raw.trim();
+                    const gidPattern = /[?&]gid=([0-9]+)/;
+                    const idMatch = raw.match(urlPattern);
+                    const gidMatch = raw.match(gidPattern);
+                    const id = idMatch && idMatch[1] ? idMatch[1] : raw.trim();
+                    const gid = gidMatch && gidMatch[1] ? Number(gidMatch[1]) : null;
+                    return { id, gid };
                 },
                 async formatEstimate() {
                     this.loading = true;
                     this.estimateFormatResult = null;
                     try {
+                        const ref = this.extractSheetRef(this.estimateFormat.source);
                         const payload = {
-                            google_sheet_id: this.extractSheetId(this.estimateFormat.source),
+                            google_sheet_id: ref.id,
+                            worksheet_gid: ref.gid,
                             column_map: this.estimateFormat.descriptionColumn
                                 ? { description: this.estimateFormat.descriptionColumn }
                                 : undefined,

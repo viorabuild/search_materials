@@ -484,6 +484,7 @@ def import_estimate():
             estimate_data = agent.import_estimate_from_gsheet(
                 google_sheet_id=google_sheet_id,
                 worksheet_name=data.get('google_worksheet') or data.get('worksheet'),
+                worksheet_gid=data.get('worksheet_gid'),
                 column_map=data.get('column_map'),
                 name=data.get('name'),
                 description=data.get('description', ""),
@@ -492,7 +493,7 @@ def import_estimate():
                 default_item_type=data.get('default_item_type', "work"),
                 create_sheet=bool(data.get('create_sheet', True)),
                 create_new_spreadsheet=bool(data.get('create_new_spreadsheet', False)),
-                target_spreadsheet_id=data.get('target_spreadsheet_id'),
+                target_spreadsheet_id=data.get('target_spreadsheet_id') or google_sheet_id,
             )
 
         return jsonify({
@@ -523,10 +524,11 @@ def estimate_headers():
         data = request.get_json() or {}
         sheet_id = data.get('google_sheet_id') or data.get('sheet_id')
         worksheet_name = data.get('google_worksheet') or data.get('worksheet')
+        worksheet_gid = data.get('worksheet_gid')
         if not sheet_id:
             return jsonify({'error': 'google_sheet_id is required'}), 400
 
-        headers = agent.get_sheet_headers(sheet_id=sheet_id, worksheet_name=worksheet_name)
+        headers = agent.get_sheet_headers(sheet_id=sheet_id, worksheet_name=worksheet_name, worksheet_gid=worksheet_gid)
         return jsonify({'success': True, 'headers': headers})
     except Exception as e:
         logger.error("Error fetching headers: %s", e)

@@ -1592,8 +1592,6 @@ class ConstructionAIAgent:
             )
 
         estimate_sheet_title = f"{sheet_titles['estimate']} — {base_title}"
-        summary_sheet_title = f"{sheet_titles['summary']} — {base_title}"
-        master_sheet_title = f"{sheet_titles['master']} — {base_title}"
 
         estimate_info = self._create_estimate_sheet_from_items(
             sheet_title=estimate_sheet_title,
@@ -1601,33 +1599,14 @@ class ConstructionAIAgent:
             labels=labels,
             sheets_ai=temp_ai,
         )
-        summary_info = self._create_summary_sheet(
-            title=summary_sheet_title,
-            estimate_sheet_title=estimate_sheet_title,
-            labels=labels,
-            total_cell=estimate_info["total_with_iva_cell"],
-            sheets_ai=temp_ai,
-        )
-        master_info = self._create_master_sheet(
-            title=master_sheet_title,
-            labels=labels,
-            sheets_ai=temp_ai,
-        )
 
         spreadsheet_url = f"https://docs.google.com/spreadsheets/d/{spreadsheet.id}"
-        sheet_links: List[Dict[str, Any]] = []
-        for info, info_type in (
-            (summary_info, "summary"),
-            (estimate_info, "estimate"),
-            (master_info, "master"),
-        ):
-            info["type"] = info_type
-            info["spreadsheet_id"] = spreadsheet.id
-            info["spreadsheet_title"] = spreadsheet.title
-            info["spreadsheet_url"] = spreadsheet_url
-            sheet_links.append(info)
+        estimate_info["type"] = "estimate"
+        estimate_info["spreadsheet_id"] = spreadsheet.id
+        estimate_info["spreadsheet_title"] = spreadsheet.title
+        estimate_info["spreadsheet_url"] = spreadsheet_url
 
-        return sheet_links
+        return [estimate_info]
 
     def _parse_sheet_reference(self, ref: Optional[str]) -> Tuple[Optional[str], Optional[str], Optional[int]]:
         """
@@ -1827,34 +1806,14 @@ class ConstructionAIAgent:
                     text_input=variant_text,
                     sheets_ai=temp_ai,
                 )
-                summary_sheet_title = f"{sheet_titles['summary']} — {suffix}"
-                master_sheet_title = f"{sheet_titles['master']} — {suffix}"
-                labels = self._labels_for_language(language)
-                summary_info = self._create_summary_sheet(
-                    title=summary_sheet_title,
-                    estimate_sheet_title=estimate_sheet_title,
-                    labels=labels,
-                    total_cell=estimate_info["total_with_iva_cell"],
-                    sheets_ai=temp_ai,
-                )
-                master_info = self._create_master_sheet(
-                    title=master_sheet_title,
-                    labels=labels,
-                    sheets_ai=temp_ai,
-                )
 
                 spreadsheet_url = f"https://docs.google.com/spreadsheets/d/{spreadsheet.id}"
-                for info, info_type in (
-                    (summary_info, "summary"),
-                    (estimate_info, "estimate"),
-                    (master_info, "master"),
-                ):
-                    info["type"] = info_type
-                    info["spreadsheet_id"] = spreadsheet.id
-                    info["spreadsheet_title"] = spreadsheet.title
-                    info["spreadsheet_url"] = spreadsheet_url
+                estimate_info["type"] = "estimate"
+                estimate_info["spreadsheet_id"] = spreadsheet.id
+                estimate_info["spreadsheet_title"] = spreadsheet.title
+                estimate_info["spreadsheet_url"] = spreadsheet_url
 
-                sheet_links.extend([summary_info, estimate_info, master_info])
+                sheet_links.append(estimate_info)
 
             result["sheets"] = sheet_links
 
@@ -1934,6 +1893,7 @@ class ConstructionAIAgent:
         self,
         google_sheet_id: Optional[str] = None,
         worksheet_name: Optional[str] = None,
+        worksheet_gid: Optional[int] = None,
         column_map: Optional[Dict[str, str]] = None,
         name: Optional[str] = None,
         description: str = "",
@@ -1971,6 +1931,18 @@ class ConstructionAIAgent:
             worksheet = spreadsheet.worksheet(worksheet_name)
         else:
             worksheet = spreadsheet.sheet1
+
+        if worksheet_gid is not None:
+            try:
+                worksheet = spreadsheet.get_worksheet_by_id(worksheet_gid)
+            except Exception:
+                worksheet = None
+
+        if not worksheet:
+            if worksheet_name:
+                worksheet = spreadsheet.worksheet(worksheet_name)
+            else:
+                worksheet = spreadsheet.sheet1
 
         values = worksheet.get_all_values()
         if not values:
