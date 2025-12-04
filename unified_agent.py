@@ -1553,6 +1553,80 @@ class ConstructionAIAgent:
             "sheet": sheet_title,
         }
 
+    def _render_estimate_to_sheets(
+        self,
+        estimate: "Estimate",
+        base_title: str,
+        language: str,
+        create_new_spreadsheet: bool = False,
+        target_spreadsheet_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Создать листы Estimate/Summary/Master в нужном формате."""
+        labels = self._labels_for_language(language)
+        sheet_titles = self._sheet_titles_for_language(language)
+        client = self._ensure_gspread_client()
+
+        if create_new_spreadsheet:
+            spreadsheet = client.create(base_title)
+            try:
+                spreadsheet.share(None, perm_type="anyone", role="reader")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to share spreadsheet %s: %s", spreadsheet.title, exc)
+        else:
+            if target_spreadsheet_id:
+                spreadsheet = client.open_by_key(target_spreadsheet_id)
+            elif self.sheets_ai:
+                spreadsheet = self.sheets_ai.spreadsheet
+            else:
+                raise RuntimeError("Google Sheets AI is not configured for this spreadsheet")
+
+        if self.sheets_ai and spreadsheet.id == self.sheets_ai.spreadsheet.id:
+            temp_ai = self.sheets_ai
+        else:
+            temp_ai = GoogleSheetsAI(
+                sheet_id=spreadsheet.id,
+                openai_client=self.openai_client,
+                llm_model=self.config.llm_model,
+            )
+
+        estimate_sheet_title = f"{sheet_titles['estimate']} — {base_title}"
+        summary_sheet_title = f"{sheet_titles['summary']} — {base_title}"
+        master_sheet_title = f"{sheet_titles['master']} — {base_title}"
+
+        estimate_info = self._create_estimate_sheet_from_items(
+            sheet_title=estimate_sheet_title,
+            estimate=estimate,
+            labels=labels,
+            sheets_ai=temp_ai,
+        )
+        summary_info = self._create_summary_sheet(
+            title=summary_sheet_title,
+            estimate_sheet_title=estimate_sheet_title,
+            labels=labels,
+            total_cell=estimate_info["total_with_iva_cell"],
+            sheets_ai=temp_ai,
+        )
+        master_info = self._create_master_sheet(
+            title=master_sheet_title,
+            labels=labels,
+            sheets_ai=temp_ai,
+        )
+
+        spreadsheet_url = f"https://docs.google.com/spreadsheets/d/{spreadsheet.id}"
+        sheet_links: List[Dict[str, Any]] = []
+        for info, info_type in (
+            (summary_info, "summary"),
+            (estimate_info, "estimate"),
+            (master_info, "master"),
+        ):
+            info["type"] = info_type
+            info["spreadsheet_id"] = spreadsheet.id
+            info["spreadsheet_title"] = spreadsheet.title
+            info["spreadsheet_url"] = spreadsheet_url
+            sheet_links.append(info)
+
+        return sheet_links
+
     def _create_summary_sheet(
         self,
         title: str,
@@ -1749,6 +1823,8 @@ class ConstructionAIAgent:
         default_item_type: ItemType | str = ItemType.WORK,
         create_sheet: bool = False,
         worksheet_name: Optional[str] = None,
+        create_new_spreadsheet: bool = False,
+        target_spreadsheet_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Импортировать Excel-файл со сметой в наш формат.
@@ -1765,6 +1841,8 @@ class ConstructionAIAgent:
             default_item_type: тип позиций (work/material/...).
             create_sheet: создать лист Google Sheets в фирменном формате.
             worksheet_name: базовое название листов при создании в Google Sheets.
+            create_new_spreadsheet: создать новую таблицу вместо текущей.
+            target_spreadsheet_id: разместить листы в конкретной таблице (по умолчанию — текущая).
         """
         if not self.estimate_importer:
             raise RuntimeError("Estimate importer not available")
@@ -1784,54 +1862,100 @@ class ConstructionAIAgent:
         result: Dict[str, Any] = {"estimate": estimate.to_dict()}
 
         if create_sheet:
-            if not self.sheets_ai:
-                raise RuntimeError("Google Sheets AI is not configured for this spreadsheet")
             language = self._detect_language(
                 estimate.metadata.name,
                 estimate.metadata.description,
                 estimate.metadata.client_name,
                 "",
             )
-            labels = self._labels_for_language(language)
-            sheet_titles = self._sheet_titles_for_language(language)
             base_title = (worksheet_name or estimate.metadata.name or "Estimate").strip() or "Estimate"
-            estimate_sheet_title = f"{sheet_titles['estimate']} — {base_title}"
-            summary_sheet_title = f"{sheet_titles['summary']} — {base_title}"
-            master_sheet_title = f"{sheet_titles['master']} — {base_title}"
-
-            estimate_info = self._create_estimate_sheet_from_items(
-                sheet_title=estimate_sheet_title,
+            sheet_links = self._render_estimate_to_sheets(
                 estimate=estimate,
-                labels=labels,
-                sheets_ai=self.sheets_ai,
+                base_title=base_title,
+                language=language,
+                create_new_spreadsheet=create_new_spreadsheet,
+                target_spreadsheet_id=target_spreadsheet_id,
             )
-            summary_info = self._create_summary_sheet(
-                title=summary_sheet_title,
-                estimate_sheet_title=estimate_sheet_title,
-                labels=labels,
-                total_cell=estimate_info["total_with_iva_cell"],
-                sheets_ai=self.sheets_ai,
-            )
-            master_info = self._create_master_sheet(
-                title=master_sheet_title,
-                labels=labels,
-                sheets_ai=self.sheets_ai,
-            )
+            result["sheets"] = sheet_links
 
-            sheet_links: List[Dict[str, Any]] = []
-            spreadsheet = self.sheets_ai.spreadsheet
-            spreadsheet_url = f"https://docs.google.com/spreadsheets/d/{spreadsheet.id}"
-            for info, info_type in (
-                (summary_info, "summary"),
-                (estimate_info, "estimate"),
-                (master_info, "master"),
-            ):
-                info["type"] = info_type
-                info["spreadsheet_id"] = spreadsheet.id
-                info["spreadsheet_title"] = spreadsheet.title
-                info["spreadsheet_url"] = spreadsheet_url
-                sheet_links.append(info)
+        return result
 
+    def import_estimate_from_gsheet(
+        self,
+        google_sheet_id: Optional[str] = None,
+        worksheet_name: Optional[str] = None,
+        column_map: Optional[Dict[str, str]] = None,
+        name: Optional[str] = None,
+        description: str = "",
+        client_name: str = "",
+        currency: str = "€",
+        default_item_type: ItemType | str = ItemType.WORK,
+        create_sheet: bool = True,
+        create_new_spreadsheet: bool = False,
+        target_spreadsheet_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Импортировать необработанную смету из Google Sheets и переложить в наш формат.
+
+        Args:
+            google_sheet_id: ID таблицы (если None — используется конфигурация агента).
+            worksheet_name: имя листа-источника (если None — первый лист).
+            column_map: сопоставление колонок.
+            name: имя итоговой сметы (по умолчанию — имя листа).
+            description, client_name, currency: метаданные сметы.
+            default_item_type: тип позиций.
+            create_sheet: создать оформленные листы.
+            create_new_spreadsheet: создать отдельную таблицу для результата.
+            target_spreadsheet_id: разместить результат в конкретной таблице (по умолчанию — в исходной).
+        """
+        if not self.estimate_importer:
+            raise RuntimeError("Estimate importer not available")
+
+        client = self._ensure_gspread_client()
+        source_sheet_id = google_sheet_id or (self.sheets_ai.spreadsheet.id if self.sheets_ai else None)
+        if not source_sheet_id:
+            raise RuntimeError("Не задан google_sheet_id и нет подключенной таблицы по умолчанию")
+
+        spreadsheet = client.open_by_key(source_sheet_id)
+        if worksheet_name:
+            worksheet = spreadsheet.worksheet(worksheet_name)
+        else:
+            worksheet = spreadsheet.sheet1
+
+        values = worksheet.get_all_values()
+        if not values:
+            raise ValueError("Лист пуст, нечего импортировать")
+        headers = values[0]
+        rows = values[1:]
+        df = self.estimate_importer.dataframe_from_values(headers, rows)
+
+        estimate = self.estimate_importer.import_from_dataframe(
+            df=df,
+            column_map=column_map,
+            name=name or worksheet.title,
+            description=description,
+            client_name=client_name,
+            currency=currency,
+            default_item_type=default_item_type,
+        )
+
+        result: Dict[str, Any] = {"estimate": estimate.to_dict()}
+
+        if create_sheet:
+            language = self._detect_language(
+                estimate.metadata.name,
+                estimate.metadata.description,
+                estimate.metadata.client_name,
+                "",
+            )
+            base_title = name or worksheet.title
+            sheet_links = self._render_estimate_to_sheets(
+                estimate=estimate,
+                base_title=base_title,
+                language=language,
+                create_new_spreadsheet=create_new_spreadsheet,
+                target_spreadsheet_id=target_spreadsheet_id or (None if create_new_spreadsheet else spreadsheet.id),
+            )
             result["sheets"] = sheet_links
 
         return result

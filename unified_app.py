@@ -446,7 +446,11 @@ def import_estimate():
         "currency": "€",
         "skip_rows": 0,
         "create_sheet": true,
-        "worksheet_name": "Import 01"
+        "worksheet_name": "Import 01",
+        "create_new_spreadsheet": false,
+        "target_spreadsheet_id": null,
+        "google_sheet_id": "...",        # альтернативно: взять данные из Google Sheets
+        "google_worksheet": "Sheet1"
     }
     """
     if not agent:
@@ -455,22 +459,41 @@ def import_estimate():
     try:
         data = request.get_json() or {}
         path = data.get('path')
-        if not path:
-            return jsonify({'error': 'path is required'}), 400
+        google_sheet_id = data.get('google_sheet_id') or data.get('sheet_id')
 
-        estimate_data = agent.import_estimate_from_excel(
-            path=path,
-            sheet_name=data.get('sheet_name'),
-            column_map=data.get('column_map'),
-            name=data.get('name'),
-            description=data.get('description', ""),
-            client_name=data.get('client_name', ""),
-            currency=data.get('currency', "€"),
-            skip_rows=int(data.get('skip_rows', 0)),
-            default_item_type=data.get('default_item_type', "work"),
-            create_sheet=bool(data.get('create_sheet', False)),
-            worksheet_name=data.get('worksheet_name'),
-        )
+        if not path and not google_sheet_id:
+            return jsonify({'error': 'path or google_sheet_id is required'}), 400
+
+        if path:
+            estimate_data = agent.import_estimate_from_excel(
+                path=path,
+                sheet_name=data.get('sheet_name'),
+                column_map=data.get('column_map'),
+                name=data.get('name'),
+                description=data.get('description', ""),
+                client_name=data.get('client_name', ""),
+                currency=data.get('currency', "€"),
+                skip_rows=int(data.get('skip_rows', 0)),
+                default_item_type=data.get('default_item_type', "work"),
+                create_sheet=bool(data.get('create_sheet', False)),
+                worksheet_name=data.get('worksheet_name'),
+                create_new_spreadsheet=bool(data.get('create_new_spreadsheet', False)),
+                target_spreadsheet_id=data.get('target_spreadsheet_id'),
+            )
+        else:
+            estimate_data = agent.import_estimate_from_gsheet(
+                google_sheet_id=google_sheet_id,
+                worksheet_name=data.get('google_worksheet') or data.get('worksheet'),
+                column_map=data.get('column_map'),
+                name=data.get('name'),
+                description=data.get('description', ""),
+                client_name=data.get('client_name', ""),
+                currency=data.get('currency', "€"),
+                default_item_type=data.get('default_item_type', "work"),
+                create_sheet=bool(data.get('create_sheet', True)),
+                create_new_spreadsheet=bool(data.get('create_new_spreadsheet', False)),
+                target_spreadsheet_id=data.get('target_spreadsheet_id'),
+            )
 
         return jsonify({
             'success': True,

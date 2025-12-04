@@ -46,9 +46,17 @@ print(result["estimate"]["summary"])
   "skip_rows": 0,
   "default_item_type": "work",
   "create_sheet": true,
-  "worksheet_name": "Import 01"
+  "worksheet_name": "Import 01",
+  "create_new_spreadsheet": false,
+  "target_spreadsheet_id": null,
+
+  "google_sheet_id": null,
+  "google_worksheet": null
 }
 ```
+
+- Если передан `path` — импорт из локального Excel.
+- Если передан `google_sheet_id` — чтение из указанной Google-таблицы (лист `google_worksheet` или первый по умолчанию) без изменения исходных данных; результат складывается в наш формат и, при `create_sheet=true`, добавляется как новые листы в ту же таблицу или в новую (`create_new_spreadsheet=true`).
 
 ## Как определяется маппинг колонок
 - Авто-поиск по синонимам (рус/eng/pt): описание, ед., количество, цена за ед., итого, код.

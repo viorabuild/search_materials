@@ -45,3 +45,34 @@ def test_excel_importer_basic(tmp_path: Path) -> None:
     assert first.total_price == 180  # 12 * 15
     assert second.quantity == 8
     assert second.unit_price == 22.5
+
+
+def test_import_from_gsheet_values(tmp_path: Path) -> None:
+    constructor = EstimateConstructor(
+        llm_client=None,
+        llm_model="dummy",
+        material_agent=None,
+        storage_path=tmp_path,
+    )
+    importer = ExcelEstimateImporter(constructor)
+
+    headers = ["Описание", "Ед.", "Qty", "Unit Price"]
+    rows = [
+        ["Штукатурка стен", "м2", "20", "8"],
+        ["Грунтовка", "л", "5", "3.5"],
+    ]
+    df = importer.dataframe_from_values(headers, rows)
+    estimate = importer.import_from_dataframe(
+        df=df,
+        column_map={
+            "description": "Описание",
+            "unit": "Ед.",
+            "quantity": "Qty",
+            "unit_price": "Unit Price",
+        },
+        name="GSheet import",
+    )
+
+    assert estimate.metadata.name == "GSheet import"
+    assert len(estimate.items) == 2
+    assert estimate.items[0].total_price == 160  # 20 * 8
