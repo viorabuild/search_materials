@@ -98,7 +98,14 @@ class ExcelEstimateImporter:
         default_item_type: ItemType | str = ItemType.WORK,
     ) -> Estimate:
         """Импорт из DataFrame (Excel/Google Sheets)."""
-        mapping = self._build_mapping(list(df.columns), df=df, column_map=column_map)
+        if column_map and not isinstance(column_map, dict):
+            column_map = None
+        try:
+            mapping = self._build_mapping(list(df.columns), df=df, column_map=column_map)
+        except Exception as exc:
+            logger.warning("Failed to build column mapping, using fallback: %s", exc)
+            first_col = str(df.columns[0]) if len(df.columns) else "Описание"
+            mapping = {"description": first_col}
         items = self._rows_to_items(df, mapping, default_item_type=default_item_type)
 
         estimate_name = name or "Estimate Import"
@@ -110,6 +117,83 @@ class ExcelEstimateImporter:
         )
         self.constructor.add_items_to_estimate(estimate.metadata.id, items)
         logger.info("Imported estimate (items=%s, name=%s)", len(items), estimate_name)
+        return estimate
+
+    def import_from_rows(
+        self,
+        headers: List[str],
+        rows: List[List[Any]],
+        column_map: Optional[Dict[str, str]] = None,
+        name: Optional[str] = None,
+        description: str = "",
+        client_name: str = "",
+        currency: str = "€",
+        default_item_type: ItemType | str = ItemType.WORK,
+    ) -> Estimate:
+        """Импорт из простой матрицы (без pandas), используется как запасной путь."""
+        # Нормализуем заголовки
+        norm_headers = [str(h or "").strip() for h in headers]
+        mapping: Dict[str, str] = {}
+
+        def find_by_alias(aliases: Iterable[str]) -> Optional[str]:
+            for h in norm_headers:
+                low = h.lower()
+                if any(alias in low for alias in aliases):
+                    return h
+            return None
+
+        mapping["description"] = (
+            (column_map or {}).get("description")
+            or find_by_alias(self.COLUMN_ALIASES["description"])
+            or (norm_headers[0] if norm_headers else "Описание")
+        )
+        for field in ("unit", "quantity", "unit_price", "total_price", "code"):
+            val = (column_map or {}).get(field) or find_by_alias(self.COLUMN_ALIASES.get(field, []))
+            if val:
+                mapping[field] = val
+
+        header_index = {h: idx for idx, h in enumerate(norm_headers)}
+        items: List[EstimateItem] = []
+        for row in rows:
+            desc_val = row[header_index.get(mapping["description"], 0)] if row else ""
+            if desc_val is None or str(desc_val).strip() == "":
+                continue
+
+            quantity = self._to_float(row[header_index.get(mapping.get("quantity", ""), -1)] if row else None)
+            unit_price = self._to_float(row[header_index.get(mapping.get("unit_price", ""), -1)] if row else None)
+            total_price = self._to_float(row[header_index.get(mapping.get("total_price", ""), -1)] if row else None)
+            if not total_price and quantity and unit_price:
+                total_price = round(quantity * unit_price, 2)
+
+            unit = ""
+            if "unit" in mapping:
+                unit = str(row[header_index.get(mapping["unit"], -1)] if row else "").strip()
+            code = ""
+            if "code" in mapping:
+                code = str(row[header_index.get(mapping["code"], -1)] if row else "").strip()
+
+            item = EstimateItem(
+                id=str(uuid.uuid4()),
+                name=str(desc_val).strip(),
+                description=str(desc_val).strip(),
+                item_type=default_item_type,
+                quantity=quantity,
+                unit=unit or "шт",
+                unit_price=unit_price,
+                total_price=total_price,
+                code=code,
+            )
+            items.append(item)
+
+        estimate_name = name or "Estimate Import"
+        estimate = self.constructor.create_estimate(
+            name=estimate_name,
+            description=description,
+            client_name=client_name,
+            currency=currency,
+        )
+        self.constructor.add_items_to_estimate(estimate.metadata.id, items)
+        logger.info("Imported estimate via rows fallback (items=%s, name=%s)", len(items), estimate_name)
         return estimate
 
     def _load_dataframe(self, path: Path | str, sheet_name: Optional[str], skip_rows: int):
@@ -155,7 +239,8 @@ class ExcelEstimateImporter:
         # Найдём первую строку, где есть непустые значения
         header_idx = None
         for idx, row in df.iterrows():
-            has_value = any(str(v).strip() for v in row.values if v is not None)
+            row_values = [v for v in row.values if v is not None]
+            has_value = any(str(v).strip() != "" for v in row_values)
             if has_value:
                 header_idx = idx
                 break
@@ -258,6 +343,24 @@ class ExcelEstimateImporter:
         return best_col
 
     def _to_float(self, value: Any) -> float:
+        # Если пришла серия/список — берём первое непустое значение
+        try:
+            import pandas as pd  # type: ignore
+            if isinstance(value, pd.Series):
+                for v in value:
+                    if v is None or str(v).strip() == "":
+                        continue
+                    return self._to_float(v)
+                return 0.0
+        except Exception:
+            pass
+        if isinstance(value, (list, tuple)):
+            for v in value:
+                if v is None or str(v).strip() == "":
+                    continue
+                return self._to_float(v)
+            return 0.0
+
         if value is None:
             return 0.0
         if isinstance(value, (int, float)):
@@ -283,6 +386,12 @@ class ExcelEstimateImporter:
         items: List[EstimateItem] = []
         for _, row in df.iterrows():
             desc_raw = row.get(mapping["description"])
+            try:
+                import pandas as pd  # type: ignore
+                if isinstance(desc_raw, pd.Series):
+                    desc_raw = next((v for v in desc_raw if str(v).strip()), "")
+            except Exception:
+                pass
             if desc_raw is None or str(desc_raw).strip() == "":
                 continue
 

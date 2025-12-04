@@ -1510,6 +1510,7 @@ class ConstructionAIAgent:
         estimate: "Estimate",
         labels: Dict[str, str],
         sheets_ai: GoogleSheetsAI,
+        existing_worksheet: Optional[gspread.Worksheet] = None,
     ) -> Dict[str, Any]:
         """Создать лист сметы по уже готовым позициям (после импорта Excel)."""
         items_data: List[Dict[str, Any]] = []
@@ -1533,7 +1534,12 @@ class ConstructionAIAgent:
             notes=[estimate.metadata.notes] if estimate.metadata.notes else None,
         )
         row_count = max(40, len(rows) + 15)
-        worksheet = self._prepare_worksheet(sheets_ai, sheet_title, row_count, 8)
+        worksheet = existing_worksheet or self._prepare_worksheet(sheets_ai, sheet_title, row_count, 8)
+        if existing_worksheet:
+            try:
+                existing_worksheet.clear()
+            except Exception:
+                pass
         worksheet.update("A1", rows, value_input_option="USER_ENTERED")
 
         self._apply_estimate_sheet_formatting(
@@ -1562,13 +1568,17 @@ class ConstructionAIAgent:
         language: str,
         create_new_spreadsheet: bool = False,
         target_spreadsheet_id: Optional[str] = None,
+        existing_spreadsheet: Optional[gspread.Spreadsheet] = None,
+        existing_worksheet: Optional[gspread.Worksheet] = None,
     ) -> List[Dict[str, Any]]:
         """Создать листы Estimate/Summary/Master в нужном формате."""
         labels = self._labels_for_language(language)
         sheet_titles = self._sheet_titles_for_language(language)
         client = self._ensure_gspread_client()
 
-        if create_new_spreadsheet:
+        if existing_spreadsheet:
+            spreadsheet = existing_spreadsheet
+        elif create_new_spreadsheet:
             spreadsheet = client.create(base_title)
             try:
                 spreadsheet.share(None, perm_type="anyone", role="reader")
@@ -1591,14 +1601,25 @@ class ConstructionAIAgent:
                 llm_model=self.config.llm_model,
             )
 
-        estimate_sheet_title = f"{sheet_titles['estimate']} — {base_title}"
-
-        estimate_info = self._create_estimate_sheet_from_items(
-            sheet_title=estimate_sheet_title,
-            estimate=estimate,
-            labels=labels,
-            sheets_ai=temp_ai,
+        estimate_sheet_title = (
+            existing_worksheet.title if existing_worksheet else f"{sheet_titles['estimate']} — {base_title}"
         )
+
+        if existing_worksheet:
+            estimate_info = self._create_estimate_sheet_from_items(
+                sheet_title=estimate_sheet_title,
+                estimate=estimate,
+                labels=labels,
+                sheets_ai=temp_ai,
+                existing_worksheet=existing_worksheet,
+            )
+        else:
+            estimate_info = self._create_estimate_sheet_from_items(
+                sheet_title=estimate_sheet_title,
+                estimate=estimate,
+                labels=labels,
+                sheets_ai=temp_ai,
+            )
 
         spreadsheet_url = f"https://docs.google.com/spreadsheets/d/{spreadsheet.id}"
         estimate_info["type"] = "estimate"
@@ -1834,6 +1855,7 @@ class ConstructionAIAgent:
         worksheet_name: Optional[str] = None,
         create_new_spreadsheet: bool = False,
         target_spreadsheet_id: Optional[str] = None,
+        rewrite_source_sheet: bool = False,
     ) -> Dict[str, Any]:
         """
         Импортировать Excel-файл со сметой в наш формат.
@@ -1927,39 +1949,45 @@ class ConstructionAIAgent:
             raise RuntimeError("Не задан google_sheet_id и нет подключенной таблицы по умолчанию")
 
         spreadsheet = client.open_by_key(source_sheet_id)
-        if worksheet_name:
-            worksheet = spreadsheet.worksheet(worksheet_name)
-        else:
-            worksheet = spreadsheet.sheet1
-
+        worksheet = None
         if worksheet_gid is not None:
             try:
                 worksheet = spreadsheet.get_worksheet_by_id(worksheet_gid)
             except Exception:
                 worksheet = None
-
+        if not worksheet and worksheet_name:
+            worksheet = spreadsheet.worksheet(worksheet_name)
         if not worksheet:
-            if worksheet_name:
-                worksheet = spreadsheet.worksheet(worksheet_name)
-            else:
-                worksheet = spreadsheet.sheet1
+            worksheet = spreadsheet.sheet1
 
         values = worksheet.get_all_values()
         if not values:
             raise ValueError("Лист пуст, нечего импортировать")
-        headers = values[0]
-        rows = values[1:]
-        df = self.estimate_importer.dataframe_from_values(headers, rows)
-
-        estimate = self.estimate_importer.import_from_dataframe(
-            df=df,
-            column_map=column_map,
-            name=name or worksheet.title,
-            description=description,
-            client_name=client_name,
-            currency=currency,
-            default_item_type=default_item_type,
-        )
+        headers = values[0] if values else []
+        rows = values[1:] if len(values) > 1 else []
+        try:
+            df = self.estimate_importer.dataframe_from_values(headers, rows)
+            estimate = self.estimate_importer.import_from_dataframe(
+                df=df,
+                column_map=column_map,
+                name=name or worksheet.title,
+                description=description,
+                client_name=client_name,
+                currency=currency,
+                default_item_type=default_item_type,
+            )
+        except Exception as exc:
+            logger.warning("DataFrame import failed, using rows fallback: %s", exc)
+            estimate = self.estimate_importer.import_from_rows(
+                headers=headers,
+                rows=rows,
+                column_map=column_map,
+                name=name or worksheet.title,
+                description=description,
+                client_name=client_name,
+                currency=currency,
+                default_item_type=default_item_type,
+            )
 
         result: Dict[str, Any] = {"estimate": estimate.to_dict()}
 
@@ -1977,6 +2005,8 @@ class ConstructionAIAgent:
                 language=language,
                 create_new_spreadsheet=create_new_spreadsheet,
                 target_spreadsheet_id=target_spreadsheet_id or (None if create_new_spreadsheet else spreadsheet.id),
+                existing_spreadsheet=spreadsheet if rewrite_source_sheet and not create_new_spreadsheet else None,
+                existing_worksheet=worksheet if rewrite_source_sheet and not create_new_spreadsheet else None,
             )
             result["sheets"] = sheet_links
 

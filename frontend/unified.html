@@ -1909,6 +1909,7 @@
                             column_map: this.estimateFormat.descriptionColumn
                                 ? { description: this.estimateFormat.descriptionColumn }
                                 : undefined,
+                            rewrite_source_sheet: true,
                         };
 
                         const response = await fetch('/api/estimate/import', {

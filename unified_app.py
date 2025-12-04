@@ -494,6 +494,7 @@ def import_estimate():
                 create_sheet=bool(data.get('create_sheet', True)),
                 create_new_spreadsheet=bool(data.get('create_new_spreadsheet', False)),
                 target_spreadsheet_id=data.get('target_spreadsheet_id') or google_sheet_id,
+                rewrite_source_sheet=bool(data.get('rewrite_source_sheet', True)),
             )
 
         return jsonify({
