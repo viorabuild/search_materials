@@ -460,6 +460,14 @@ def import_estimate():
         data = request.get_json() or {}
         path = data.get('path')
         google_sheet_id = data.get('google_sheet_id') or data.get('sheet_id')
+        format_version = int(data.get('format_version', 1)) if str(data.get('format_version', '1')).strip().isdigit() else 1
+        translate = bool(data.get('translate', False))
+        translate_from = data.get('translate_from') or "pt"
+        translate_to = data.get('translate_to') or "ru"
+        try:
+            translation_context_tokens = int(data.get('translation_context_tokens', 0) or 0)
+        except Exception:
+            translation_context_tokens = 0
 
         if not path and not google_sheet_id:
             return jsonify({'error': 'path or google_sheet_id is required'}), 400
@@ -495,6 +503,11 @@ def import_estimate():
                 create_new_spreadsheet=bool(data.get('create_new_spreadsheet', False)),
                 target_spreadsheet_id=data.get('target_spreadsheet_id') or google_sheet_id,
                 rewrite_source_sheet=bool(data.get('rewrite_source_sheet', False)),
+                format_version=format_version,
+                translate=translate,
+                translate_from=translate_from,
+                translate_to=translate_to,
+                translation_context_tokens=translation_context_tokens or None,
             )
 
         return jsonify({

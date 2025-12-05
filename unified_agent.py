@@ -80,6 +80,9 @@ if TYPE_CHECKING:
 load_dotenv()
 logger = logging.getLogger(__name__)
 
+FORMAT2_DEFAULT_CONTEXT_TOKENS = 30000
+FORMAT2_HEADER_COLOR = {"red": 12 / 255, "green": 48 / 255, "blue": 46 / 255}
+
 
 MATERIAL_SEARCH_REQUESTS = Counter(
     "construction_material_search_requests_total",
@@ -1386,6 +1389,307 @@ class ConstructionAIAgent:
             except Exception as exc:
                 logger.warning("Failed to apply batched borders: %s", exc)
 
+    def _is_integer_like(self, value: Any) -> bool:
+        """Определить, выглядит ли значение как целое число."""
+        if value is None:
+            return False
+        try:
+            normalized = str(value).strip()
+            if not normalized:
+                return False
+            normalized = normalized.replace(",", ".")
+            num = float(normalized)
+            return float(num).is_integer()
+        except Exception:
+            return False
+
+    def _extract_format2_items(
+        self,
+        headers: List[Any],
+        rows: List[List[Any]],
+        column_map: Optional[Dict[str, str]],
+        *,
+        name: Optional[str],
+        description: str,
+        client_name: str,
+        currency: str,
+        default_item_type: ItemType | str,
+    ) -> Tuple[List[Dict[str, Any]], Optional[Estimate]]:
+        """Подготовить строки для «Формат 2» и вернуть импортированную смету (если удалось)."""
+        if not self.estimate_importer:
+            raise RuntimeError("Estimate importer not available")
+
+        df = self.estimate_importer.dataframe_from_values(headers, rows)
+        mapping = self.estimate_importer._build_mapping(list(df.columns), column_map, df=df)
+
+        items: List[Dict[str, Any]] = []
+        for _, row in df.iterrows():
+            desc_raw = row.get(mapping["description"])
+            desc = str(desc_raw).strip() if desc_raw is not None else ""
+            if not desc:
+                continue
+
+            code = ""
+            if "code" in mapping:
+                code_val = row.get(mapping["code"], "")
+                code = str(code_val or "").strip()
+
+            number = ""
+            if "number" in mapping:
+                num_val = row.get(mapping["number"], "")
+                number = str(num_val or "").strip()
+
+            unit = ""
+            if "unit" in mapping:
+                unit_val = row.get(mapping["unit"], "")
+                unit = str(unit_val or "").strip()
+
+            qty = self.estimate_importer._to_float(row.get(mapping.get("quantity", ""), 0.0))
+            unit_price = self.estimate_importer._to_float(row.get(mapping.get("unit_price", ""), 0.0))
+
+            is_section = self._is_integer_like(number) and not unit and qty == 0 and unit_price == 0
+
+            items.append({
+                "translation_id": str(len(items)),
+                "code": code,
+                "number": number,
+                "description": desc,
+                "unit": unit,
+                "quantity": qty,
+                "unit_price": unit_price,
+                "is_section": is_section,
+            })
+
+        estimate: Optional[Estimate] = None
+        try:
+            estimate = self.estimate_importer.import_from_dataframe(
+                df=df,
+                column_map=column_map,
+                name=name or "Estimate Import",
+                description=description,
+                client_name=client_name,
+                currency=currency,
+                default_item_type=default_item_type,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to build estimate object for format 2: %s", exc)
+
+        return items, estimate
+
+    def _translate_format2_batch(
+        self,
+        batch: List[Dict[str, Any]],
+        source_lang: str,
+        target_lang: str,
+        max_tokens: int,
+    ) -> Dict[str, str]:
+        """Перевести пачку описаний через LLM."""
+        if not batch or not self.openai_client:
+            return {}
+
+        source_label = "португальского (Португалия)" if source_lang == "pt" else "русского (возможно вперемешку с украинским)"
+        target_label = "португальский (Португалия)" if target_lang == "pt" else "русский (учитывай украинские слова)"
+
+        system_prompt = (
+            "Ты профессиональный переводчик со строительным уклоном. "
+            f"Переводи строго с {source_label} на {target_label}, максимально точно и без вольных интерпретаций. "
+            "Сохраняй числа, валюты, единицы измерения и структуру списка. "
+            "Если текст уже на целевом языке, верни его без изменений. "
+            "Верни JSON с объектом translations: {\"id\": \"перевод\"}."
+        )
+
+        payload = {
+            "items": [{"id": item["translation_id"], "text": item.get("description", "")} for item in batch],
+            "source_language": source_lang,
+            "target_language": target_lang,
+        }
+
+        max_tokens = max(800, min(int(max_tokens or FORMAT2_DEFAULT_CONTEXT_TOKENS), FORMAT2_DEFAULT_CONTEXT_TOKENS))
+        try:
+            LLM_REQUESTS.inc()
+            completion = self.openai_client.chat.completions.create(
+                model=self.config.llm_model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+                ],
+                temperature=0.2,
+                response_format={"type": "json_object"},
+                max_tokens=max_tokens,
+            )
+            content = completion.choices[0].message.content or "{}"
+            parsed = json.loads(content)
+            return parsed.get("translations") or parsed
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Translation batch failed: %s", exc)
+            return {}
+
+    def _translate_format2_items(
+        self,
+        items: List[Dict[str, Any]],
+        source_lang: str,
+        target_lang: str,
+        context_tokens: int = FORMAT2_DEFAULT_CONTEXT_TOKENS,
+    ) -> Dict[str, str]:
+        """Перевести описания для столбца H с разбивкой на батчи по ограничению контекста."""
+        if not items or not self.openai_client:
+            return {}
+
+        translations: Dict[str, str] = {}
+        batch: List[Dict[str, Any]] = []
+        approx_limit = max(1000, context_tokens)
+        current_tokens = 0
+
+        for item in items:
+            text = item.get("description", "")
+            if not text:
+                continue
+            approx_tokens = max(1, len(text) // 4)
+            if batch and (current_tokens + approx_tokens > approx_limit):
+                translations.update(
+                    self._translate_format2_batch(batch, source_lang, target_lang, max_tokens=approx_limit)
+                )
+                batch = []
+                current_tokens = 0
+            batch.append(item)
+            current_tokens += approx_tokens
+
+        if batch:
+            translations.update(
+                self._translate_format2_batch(batch, source_lang, target_lang, max_tokens=approx_limit)
+            )
+
+        return translations
+
+    def _build_format2_rows(
+        self,
+        items: List[Dict[str, Any]],
+        translations: Dict[str, str],
+    ) -> Tuple[List[List[Any]], List[int]]:
+        """Собрать строки для таблицы Формат 2 и отметить строки-заголовки."""
+        header = [
+            "ID на мастер лист",
+            "№",
+            "Описание",
+            "Единица измерения",
+            "Количество",
+            "Цена за штуку (€)",
+            "Сумма (€)",
+            "Перевод",
+        ]
+        rows: List[List[Any]] = [header]
+        section_rows: List[int] = []
+
+        for idx, item in enumerate(items, start=1):
+            sheet_row = len(rows) + 1
+            translation = translations.get(item.get("translation_id", ""), "")
+
+            qty_val: Any = item.get("quantity", "")
+            if qty_val == 0:
+                qty_val = ""
+            unit_price_val: Any = item.get("unit_price", "")
+            if unit_price_val == 0:
+                unit_price_val = ""
+
+            total_formula = f"=IF(AND(ISNUMBER(E{sheet_row}),ISNUMBER(F{sheet_row})),E{sheet_row}*F{sheet_row},\"\")"
+            if item.get("is_section"):
+                section_rows.append(sheet_row)
+                qty_val = ""
+                unit_price_val = ""
+                total_formula = ""
+
+            rows.append([
+                item.get("code") or "",
+                item.get("number") or str(idx),
+                item.get("description") or "",
+                item.get("unit") or "",
+                qty_val,
+                unit_price_val,
+                total_formula,
+                translation,
+            ])
+
+        return rows, section_rows
+
+    def _apply_format2_formatting(
+        self,
+        sheets_ai: GoogleSheetsAI,
+        worksheet: gspread.Worksheet,
+        section_rows: List[int],
+        rows_count: int,
+    ) -> None:
+        """Применить правила форматирования для Формат 2."""
+        try:
+            base_range = f"A1:H{rows_count}"
+            sheets_ai.format_range(
+                base_range,
+                {
+                    "fontFamily": "Calibri",
+                    "fontSize": 12,
+                    "verticalAlignment": "MIDDLE",
+                    "wrapStrategy": "WRAP",
+                },
+                worksheet_name=worksheet.title,
+            )
+
+            sheets_ai.format_range(
+                "A1:H1",
+                {
+                    "backgroundColor": FORMAT2_HEADER_COLOR,
+                    "textColor": {"red": 1, "green": 1, "blue": 1},
+                    "bold": True,
+                    "alignment": "CENTER",
+                    "verticalAlignment": "MIDDLE",
+                },
+                worksheet_name=worksheet.title,
+            )
+
+            if rows_count > 1:
+                numeric_columns = ("A", "B", "D", "E", "F", "G")
+                for col in numeric_columns:
+                    sheets_ai.format_range(
+                        f"{col}2:{col}{rows_count}",
+                        {"alignment": "CENTER", "verticalAlignment": "MIDDLE"},
+                        worksheet_name=worksheet.title,
+                    )
+                for col in ("C", "H"):
+                    sheets_ai.format_range(
+                        f"{col}2:{col}{rows_count}",
+                        {"alignment": "LEFT", "verticalAlignment": "MIDDLE"},
+                        worksheet_name=worksheet.title,
+                    )
+                sheets_ai.format_range(
+                    f"E2:E{rows_count}",
+                    {"numberFormat": {"type": "NUMBER", "pattern": "0.00"}},
+                    worksheet_name=worksheet.title,
+                )
+                sheets_ai.format_range(
+                    f"F2:F{rows_count}",
+                    {"numberFormat": {"type": "CURRENCY", "pattern": "#,##0.00 [$€]"}},
+                    worksheet_name=worksheet.title,
+                )
+                sheets_ai.format_range(
+                    f"G2:G{rows_count}",
+                    {"numberFormat": {"type": "CURRENCY", "pattern": "#,##0.00 [$€]"}},
+                    worksheet_name=worksheet.title,
+                )
+
+            for row_idx in section_rows:
+                sheets_ai.format_range(
+                    f"A{row_idx}:H{row_idx}",
+                    {
+                        "backgroundColor": FORMAT2_HEADER_COLOR,
+                        "textColor": {"red": 1, "green": 1, "blue": 1},
+                        "fontSize": 14,
+                        "bold": True,
+                        "alignment": "CENTER",
+                        "verticalAlignment": "MIDDLE",
+                    },
+                    worksheet_name=worksheet.title,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to apply format 2 styling: %s", exc)
+
     def _build_estimate_rows(
         self,
         items: List[Dict[str, Any]],
@@ -1994,6 +2298,106 @@ class ConstructionAIAgent:
 
         return result
 
+    def _format_estimate_v2(
+        self,
+        spreadsheet: gspread.Spreadsheet,
+        worksheet: gspread.Worksheet,
+        values: List[List[Any]],
+        column_map: Optional[Dict[str, str]],
+        *,
+        name: Optional[str],
+        description: str,
+        client_name: str,
+        currency: str,
+        default_item_type: ItemType | str,
+        create_new_spreadsheet: bool,
+        target_spreadsheet_id: Optional[str],
+        translate: bool,
+        translate_from: str,
+        translate_to: str,
+        translation_context_tokens: int,
+    ) -> Dict[str, Any]:
+        """Создать лист «Формат 2» с переводом и разметкой."""
+        headers = values[0] if values else []
+        data_rows = values[1:] if len(values) > 1 else []
+        items, estimate = self._extract_format2_items(
+            headers=headers,
+            rows=data_rows,
+            column_map=column_map,
+            name=name,
+            description=description,
+            client_name=client_name,
+            currency=currency,
+            default_item_type=default_item_type,
+        )
+
+        if not items:
+            raise ValueError("Не удалось найти строки для форматирования")
+
+        translations: Dict[str, str] = {}
+        if translate:
+            translations = self._translate_format2_items(
+                items,
+                source_lang=translate_from or "pt",
+                target_lang=translate_to or "ru",
+                context_tokens=translation_context_tokens or FORMAT2_DEFAULT_CONTEXT_TOKENS,
+            )
+
+        rows, section_rows = self._build_format2_rows(items, translations)
+
+        client = self._ensure_gspread_client()
+        target_spreadsheet = spreadsheet
+        if create_new_spreadsheet:
+            target_spreadsheet = client.create((name or worksheet.title) + " — Формат 2")
+            try:
+                target_spreadsheet.share(None, perm_type="anyone", role="reader")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to make new spreadsheet public: %s", exc)
+        elif target_spreadsheet_id:
+            target_spreadsheet = client.open_by_key(target_spreadsheet_id)
+
+        target_ai = self.sheets_ai
+        if not target_ai or target_ai.spreadsheet.id != target_spreadsheet.id:
+            target_ai = GoogleSheetsAI(
+                sheet_id=target_spreadsheet.id,
+                openai_client=self.openai_client,
+                llm_model=self.config.llm_model,
+            )
+
+        sheet_title = f"{worksheet.title} — Формат 2"
+        prepared = self._prepare_worksheet(
+            target_ai,
+            sheet_title,
+            max(len(rows) + 10, 60),
+            8,
+        )
+        prepared.update("A1", rows, value_input_option="USER_ENTERED")
+        try:
+            prepared.freeze(rows=1)
+        except Exception:
+            pass
+
+        self._apply_format2_formatting(target_ai, prepared, section_rows, len(rows))
+
+        gid = getattr(prepared, "id", None) or prepared._properties.get("sheetId")
+        sheet_url = f"https://docs.google.com/spreadsheets/d/{target_spreadsheet.id}/edit#gid={gid}"
+
+        return {
+            "estimate": estimate.to_dict() if estimate else None,
+            "sheets": [
+                {
+                    "type": "estimate_format2",
+                    "title": sheet_title,
+                    "sheet": sheet_title,
+                    "url": sheet_url,
+                    "rows": len(rows),
+                    "spreadsheet_id": target_spreadsheet.id,
+                    "spreadsheet_title": target_spreadsheet.title,
+                    "spreadsheet_url": f"https://docs.google.com/spreadsheets/d/{target_spreadsheet.id}",
+                }
+            ],
+        }
+
     def import_estimate_from_gsheet(
         self,
         google_sheet_id: Optional[str] = None,
@@ -2009,6 +2413,11 @@ class ConstructionAIAgent:
         create_new_spreadsheet: bool = False,
         target_spreadsheet_id: Optional[str] = None,
         rewrite_source_sheet: bool = False,
+        format_version: int = 1,
+        translate: bool = False,
+        translate_from: str = "pt",
+        translate_to: str = "ru",
+        translation_context_tokens: int = FORMAT2_DEFAULT_CONTEXT_TOKENS,
         **_: Any,
     ) -> Dict[str, Any]:
         """
@@ -2020,10 +2429,10 @@ class ConstructionAIAgent:
             column_map: сопоставление колонок.
             name: имя итоговой сметы (по умолчанию — имя листа).
             description, client_name, currency: метаданные сметы.
-            default_item_type: тип позиций.
-            create_sheet: создать оформленные листы.
-            create_new_spreadsheet: создать отдельную таблицу для результата.
-            target_spreadsheet_id: разместить результат в конкретной таблице (по умолчанию — в исходной).
+        default_item_type: тип позиций.
+        create_sheet: создать оформленные листы.
+        create_new_spreadsheet: создать отдельную таблицу для результата.
+        target_spreadsheet_id: разместить результат в конкретной таблице (по умолчанию — в исходной).
         """
         if not self.estimate_importer:
             raise RuntimeError("Estimate importer not available")
@@ -2048,6 +2457,33 @@ class ConstructionAIAgent:
         values = worksheet.get_all_values()
         if not values:
             raise ValueError("Лист пуст, нечего импортировать")
+
+        try:
+            translation_context_tokens = int(translation_context_tokens or FORMAT2_DEFAULT_CONTEXT_TOKENS)
+        except Exception:
+            translation_context_tokens = FORMAT2_DEFAULT_CONTEXT_TOKENS
+        if translation_context_tokens <= 0:
+            translation_context_tokens = FORMAT2_DEFAULT_CONTEXT_TOKENS
+
+        if format_version == 2:
+            return self._format_estimate_v2(
+                spreadsheet=spreadsheet,
+                worksheet=worksheet,
+                values=values,
+                column_map=column_map,
+                name=name or worksheet.title,
+                description=description,
+                client_name=client_name,
+                currency=currency,
+                default_item_type=default_item_type,
+                create_new_spreadsheet=create_new_spreadsheet,
+                target_spreadsheet_id=target_spreadsheet_id,
+                translate=translate,
+                translate_from=translate_from,
+                translate_to=translate_to,
+                translation_context_tokens=translation_context_tokens,
+            )
+
         headers = values[0] if values else []
         rows = values[1:] if len(values) > 1 else []
         estimate: Optional[Estimate] = None

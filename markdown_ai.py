@@ -639,6 +639,30 @@ class GoogleSheetsAI:
                 user_format['wrapStrategy'] = value
                 mark('wrapStrategy')
 
+        # Number format
+        number_format_spec = get_value('numberformat', 'number_format')
+        if number_format_spec:
+            number_format: Dict[str, Any] = {}
+            if isinstance(number_format_spec, str):
+                number_format["type"] = "NUMBER"
+                number_format["pattern"] = number_format_spec
+            elif isinstance(number_format_spec, dict):
+                fmt_type = number_format_spec.get("type") or number_format_spec.get("category")
+                if fmt_type:
+                    number_format["type"] = str(fmt_type).upper()
+                fmt_pattern = (
+                    number_format_spec.get("pattern")
+                    or number_format_spec.get("format")
+                    or number_format_spec.get("mask")
+                )
+                if fmt_pattern:
+                    number_format["pattern"] = str(fmt_pattern)
+            if number_format:
+                if "type" not in number_format:
+                    number_format["type"] = "NUMBER"
+                user_format["numberFormat"] = number_format
+                mark("numberFormat")
+
         # Borders
         borders_spec = get_value('borders', 'border')
         borders: Dict[str, Any] = {}
