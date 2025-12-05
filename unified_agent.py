@@ -82,6 +82,7 @@ logger = logging.getLogger(__name__)
 
 FORMAT2_DEFAULT_CONTEXT_TOKENS = 30000
 FORMAT2_HEADER_COLOR = {"red": 12 / 255, "green": 48 / 255, "blue": 46 / 255}
+SPLIT_CONTEXT_TOKENS = 120000
 
 
 MATERIAL_SEARCH_REQUESTS = Counter(
@@ -2394,6 +2395,231 @@ class ConstructionAIAgent:
                     "spreadsheet_id": target_spreadsheet.id,
                     "spreadsheet_title": target_spreadsheet.title,
                     "spreadsheet_url": f"https://docs.google.com/spreadsheets/d/{target_spreadsheet.id}",
+                }
+            ],
+        }
+
+    def split_work_materials(
+        self,
+        google_sheet_id: Optional[str],
+        worksheet_name: Optional[str] = None,
+        worksheet_gid: Optional[int] = None,
+        column_map: Optional[Dict[str, str]] = None,
+        context_tokens: int = SPLIT_CONTEXT_TOKENS,
+    ) -> Dict[str, Any]:
+        """Разбить строки сметы на работы/материалы, добавляя новые строки под каждой."""
+        if not self.estimate_importer:
+            raise RuntimeError("Estimate importer not available")
+        if not self.openai_client:
+            raise RuntimeError("LLM client not configured")
+
+        client = self._ensure_gspread_client()
+        source_sheet_id = google_sheet_id or (self.sheets_ai.spreadsheet.id if self.sheets_ai else None)
+        if not source_sheet_id:
+            raise RuntimeError("Не указан google_sheet_id и нет таблицы по умолчанию")
+
+        spreadsheet = client.open_by_key(source_sheet_id)
+        worksheet = None
+        if worksheet_gid is not None:
+            try:
+                worksheet = spreadsheet.get_worksheet_by_id(worksheet_gid)
+            except Exception:
+                worksheet = None
+        if not worksheet and worksheet_name:
+            worksheet = spreadsheet.worksheet(worksheet_name)
+        if not worksheet:
+            worksheet = spreadsheet.sheet1
+
+        values = worksheet.get_all_values()
+        if not values or len(values) < 2:
+            raise ValueError("Лист пуст или не содержит данных для разбиения")
+
+        headers = values[0]
+        data_rows = values[1:]
+        df = self.estimate_importer.dataframe_from_values(headers, data_rows)
+        mapping = self.estimate_importer._build_mapping(list(df.columns), column_map, df=df)
+        if "description" not in mapping:
+            raise ValueError("Не удалось определить колонку с описанием")
+
+        header_index = {str(h): idx for idx, h in enumerate(headers)}
+        desc_idx = header_index.get(mapping["description"])
+        qty_idx = header_index.get(mapping.get("quantity", ""), None)
+        unit_idx = header_index.get(mapping.get("unit", ""), None)
+        number_idx = header_index.get(mapping.get("number", ""), None)
+        price_idx = header_index.get(mapping.get("unit_price", ""), None)
+
+        items_for_model = []
+        for df_idx, row in df.iterrows():
+            row_number = df_idx + 2  # +2 because header is row1
+            desc_val = row.get(mapping["description"])
+            desc = str(desc_val or "").strip()
+            if not desc:
+                continue
+            item = {
+                "row": row_number,
+                "number": str(row.get(mapping.get("number", ""), "") or "").strip(),
+                "description": desc,
+                "unit": str(row.get(mapping.get("unit", ""), "") or "").strip(),
+                "quantity": self.estimate_importer._to_float(row.get(mapping.get("quantity", ""), 0.0)),
+            }
+            items_for_model.append(item)
+
+        if not items_for_model:
+            raise ValueError("Не нашлось строк с описанием для разбиения")
+
+        system_prompt = (
+            "Ты опытный сметчик. Разбивай каждый пункт сметы на конкретные работы и материалы. "
+            "Думай глубоко, используй контекст до 120000 токенов. "
+            "Не удаляй исходные строки, только добавляй под ними дочерние строки. "
+            "Корректируй единицы и количество в зависимости от типа работы/материала. "
+            "Выводи только JSON вида {\"rows\":[{\"source_row\":2,\"items\":[{\"type\":\"work|material\",\"number\":\"1.1\",\"description\":\"...\",\"unit\":\"м2\",\"quantity\":12}]}]}."
+        )
+        user_payload = {
+            "items": items_for_model,
+            "rules": [
+                "Каждая исходная строка -> массив дочерних items (можно пустой, если нечего добавлять).",
+                "Числа и единицы должны быть реалистичны для описания.",
+                "Если нет данных для цены, не придумывай цену.",
+                "description должен быть конкретным действием или названием материала.",
+                "number можно уточнить с десятичными подномерами (1.1, 1.2 ...).",
+            ],
+        }
+
+        try:
+            LLM_REQUESTS.inc()
+            completion = self.openai_client.chat.completions.create(
+                model=self.config.llm_model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+                ],
+                temperature=0.35,
+                max_tokens=1800,
+                response_format={"type": "json_object"},
+            )
+            content = completion.choices[0].message.content or "{}"
+            parsed = json.loads(content)
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"Ошибка LLM при разбиении: {exc}") from exc
+
+        split_map: Dict[int, List[Dict[str, Any]]] = {}
+        for row_entry in parsed.get("rows", []) or []:
+            try:
+                source_row = int(row_entry.get("source_row"))
+            except Exception:
+                continue
+            items = row_entry.get("items") or []
+            if not isinstance(items, list):
+                continue
+            split_map[source_row] = []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                split_map[source_row].append(item)
+
+        header_len = max(len(r) for r in values)
+        padded_headers = list(headers)
+        if len(padded_headers) < header_len:
+            padded_headers += [""] * (header_len - len(padded_headers))
+        output_rows: List[List[Any]] = [padded_headers]
+
+        total_idx = None
+        for idx, name in enumerate(headers):
+            low = str(name).lower()
+            if any(key in low for key in ("сум", "total")):
+                total_idx = idx
+                break
+        master_idx = 0 if headers else None
+
+        rows_added = 0
+        for rel_idx, row in enumerate(data_rows, start=2):
+            base_row = list(row)
+            if len(base_row) < header_len:
+                base_row += [""] * (header_len - len(base_row))
+            elif len(base_row) > header_len:
+                base_row = base_row[:header_len]
+            output_rows.append(base_row)
+
+            additions = split_map.get(rel_idx, [])
+            if not additions:
+                continue
+
+            parent_number = ""
+            if number_idx is not None and number_idx < len(base_row):
+                parent_number = str(base_row[number_idx] or "").strip()
+            master_val = base_row[master_idx] if master_idx is not None and master_idx < len(base_row) else ""
+
+            for idx_add, item in enumerate(additions, start=1):
+                new_row = [""] * header_len
+                if master_idx is not None and master_idx < header_len:
+                    new_row[master_idx] = master_val
+                if number_idx is not None and number_idx < header_len:
+                    new_row[number_idx] = item.get("number") or (f"{parent_number}.{idx_add}" if parent_number else f"{rel_idx}.{idx_add}")
+                if desc_idx is not None and desc_idx < header_len:
+                    prefix = "Работа" if str(item.get("type", "")).lower().startswith("work") else "Материал"
+                    desc_text = str(item.get("description") or "").strip()
+                    new_row[desc_idx] = f"[{prefix}] {desc_text}".strip()
+                if unit_idx is not None and unit_idx < header_len:
+                    new_row[unit_idx] = item.get("unit") or ""
+                if qty_idx is not None and qty_idx < header_len:
+                    qty_val = item.get("quantity")
+                    try:
+                        qty_val = float(qty_val)
+                    except Exception:
+                        qty_val = qty_val or ""
+                    new_row[qty_idx] = qty_val
+                output_rows.append(new_row)
+                rows_added += 1
+
+        def apply_total_formulas():
+            if total_idx is None or qty_idx is None or price_idx is None:
+                return
+            qty_col = self._column_letter(qty_idx + 1)
+            price_col = self._column_letter(price_idx + 1)
+            total_col = self._column_letter(total_idx + 1)
+            for row_num, row in enumerate(output_rows[1:], start=2):
+                if len(row) <= total_idx:
+                    continue
+                row[total_idx] = (
+                    f"=IF(AND(ISNUMBER({qty_col}{row_num}),ISNUMBER({price_col}{row_num})),"
+                    f"{qty_col}{row_num}*{price_col}{row_num},\"\")"
+                )
+
+        apply_total_formulas()
+
+        worksheet.update("A1", output_rows, value_input_option="USER_ENTERED")
+        try:
+            apply_format2 = len(headers) >= 8 and str(headers[0]).lower().startswith("id")
+            if apply_format2:
+                target_ai = self.sheets_ai
+                if not target_ai or target_ai.spreadsheet.id != spreadsheet.id:
+                    target_ai = GoogleSheetsAI(
+                        sheet_id=spreadsheet.id,
+                        openai_client=self.openai_client,
+                        llm_model=self.config.llm_model,
+                    )
+                self._apply_format2_formatting(
+                    sheets_ai=target_ai,
+                    worksheet=worksheet,
+                    section_rows=[],
+                    rows_count=len(output_rows),
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to re-apply formatting after split: %s", exc)
+
+        sheet_url = f"https://docs.google.com/spreadsheets/d/{spreadsheet.id}/edit#gid={worksheet.id}"
+        return {
+            "rows_added": rows_added,
+            "total_rows": len(output_rows),
+            "sheets": [
+                {
+                    "type": "estimate_split",
+                    "title": worksheet.title,
+                    "sheet": worksheet.title,
+                    "url": sheet_url,
+                    "spreadsheet_id": spreadsheet.id,
+                    "spreadsheet_title": spreadsheet.title,
+                    "spreadsheet_url": f"https://docs.google.com/spreadsheets/d/{spreadsheet.id}",
                 }
             ],
         }

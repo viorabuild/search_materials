@@ -1093,6 +1093,111 @@
                                 </template>
                             </div>
                         </div>
+
+                        <div class="border-t border-gray-200 pt-6 mt-6 space-y-4">
+                            <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                                <div>
+                                    <h3 class="text-xl font-bold text-gray-800">
+                                        🛠️ Проработка сметы — разбить на работы и материалы
+                                    </h3>
+                                    <p class="text-gray-600 text-sm">
+                                        ИИ глубоко анализирует каждый пункт (контекст 120k токенов) и добавляет под ним детализированные строки работ и материалов.
+                                    </p>
+                                </div>
+                                <span class="text-xs text-gray-500">Исходные строки остаются на месте</span>
+                            </div>
+
+                            <div class="bg-white border border-gray-200 rounded-lg p-4 space-y-4">
+                                <div class="space-y-2">
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">
+                                        Ссылка или ID таблицы
+                                    </label>
+                                    <input
+                                        v-model="splitStage.source"
+                                        @change="loadSplitHeaders"
+                                        type="text"
+                                        class="w-full border border-gray-300 rounded-lg p-3"
+                                        placeholder="https://docs.google.com/spreadsheets/d/..."
+                                    >
+                                </div>
+
+                                <div v-if="splitStage.headers && splitStage.headers.length" class="grid md:grid-cols-2 gap-4">
+                                    <div class="space-y-2">
+                                        <label class="block text-sm font-medium text-gray-700 mb-1">Колонка описания</label>
+                                        <select v-model="splitStage.descriptionColumn" class="w-full border border-gray-300 rounded-lg p-3">
+                                            <option value="">Авто</option>
+                                            <option v-for="(h, idx) in splitStage.headers" :key="'split-desc-'+idx" :value="h">{{ h || '(пустая ячейка)' }}</option>
+                                        </select>
+                                    </div>
+                                    <div class="space-y-2">
+                                        <label class="block text-sm font-medium text-gray-700 mb-1">Колонка номера</label>
+                                        <select v-model="splitStage.numberColumn" class="w-full border border-gray-300 rounded-lg p-3">
+                                            <option value="">Авто</option>
+                                            <option v-for="(h, idx) in splitStage.headers" :key="'split-num-'+idx" :value="h">{{ h || '(пустая ячейка)' }}</option>
+                                        </select>
+                                    </div>
+                                    <div class="space-y-2">
+                                        <label class="block text-sm font-medium text-gray-700 mb-1">Колонка ед. изм.</label>
+                                        <select v-model="splitStage.unitColumn" class="w-full border border-gray-300 rounded-lg p-3">
+                                            <option value="">Авто</option>
+                                            <option v-for="(h, idx) in splitStage.headers" :key="'split-unit-'+idx" :value="h">{{ h || '(пустая ячейка)' }}</option>
+                                        </select>
+                                    </div>
+                                    <div class="space-y-2">
+                                        <label class="block text-sm font-medium text-gray-700 mb-1">Колонка количества</label>
+                                        <select v-model="splitStage.quantityColumn" class="w-full border border-gray-300 rounded-lg p-3">
+                                            <option value="">Авто</option>
+                                            <option v-for="(h, idx) in splitStage.headers" :key="'split-qty-'+idx" :value="h">{{ h || '(пустая ячейка)' }}</option>
+                                        </select>
+                                    </div>
+                                </div>
+
+                                <div class="text-sm text-gray-700 bg-gray-50 border border-dashed border-gray-300 rounded-lg p-3">
+                                    <div class="font-semibold text-gray-800 mb-1">Что делает ИИ:</div>
+                                    <ul class="list-disc pl-5 space-y-1">
+                                        <li>Не удаляет исходную строку, а добавляет под ней работы и материалы.</li>
+                                        <li>Подбирает реалистичные ед. измерения и количество отдельно для работ и материалов.</li>
+                                        <li>Количество столбцов сохраняется, суммы пересчитываются формулой по ряду.</li>
+                                    </ul>
+                                </div>
+
+                                <button
+                                    @click="splitWorkMaterials"
+                                    :disabled="loading || !splitStage.source.trim()"
+                                    class="bg-blue-700 text-white px-6 py-3 rounded-lg hover:bg-blue-800 disabled:bg-gray-400 transition-colors"
+                                >
+                                    <i class="fas fa-layer-group mr-2"></i>
+                                    Разбить на работы и материалы
+                                </button>
+                            </div>
+
+                            <div v-if="splitStageResult" class="result-box">
+                                <template v-if="splitStageResult.error">
+                                    <div class="text-red-600 font-semibold">
+                                        Ошибка: {{ splitStageResult.error }}
+                                    </div>
+                                </template>
+                                <template v-else>
+                                    <div class="space-y-2">
+                                        <div class="font-semibold text-gray-800">
+                                            Добавлено строк: {{ splitStageResult.rows_added || 0 }} · Всего строк: {{ splitStageResult.total_rows || 0 }}
+                                        </div>
+                                        <div v-if="splitStageResult.sheets && splitStageResult.sheets.length" class="space-y-1">
+                                            <div class="font-semibold text-gray-800">Обновлённые листы:</div>
+                                            <div
+                                                v-for="(sheet, idx) in splitStageResult.sheets"
+                                                :key="'split-sheet-' + idx"
+                                                class="flex items-center space-x-2 text-blue-700"
+                                            >
+                                                <i class="fas fa-link"></i>
+                                                <a :href="sheet.url" target="_blank" class="underline">{{ sheet.title }}</a>
+                                                <span class="text-gray-600">— {{ sheet.spreadsheet_title }}</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </template>
+                            </div>
+                        </div>
                     </div>
 
                     <!-- Estimate Check Tab -->
@@ -1387,6 +1492,15 @@
                         contextTokens: 30000,
                     },
                     estimateFormatResultV2: null,
+                    splitStage: {
+                        source: '',
+                        headers: [],
+                        descriptionColumn: '',
+                        unitColumn: '',
+                        quantityColumn: '',
+                        numberColumn: '',
+                    },
+                    splitStageResult: null,
                     estimateCheck: {
                         estimateSheet: '',
                         masterSheet: '',
@@ -1471,6 +1585,35 @@
                         }
                     } catch (error) {
                         this.estimateFormatV2.headers = [];
+                    }
+                },
+                async loadSplitHeaders() {
+                    if (!this.splitStage.source.trim()) {
+                        this.splitStage.headers = [];
+                        this.splitStage.descriptionColumn = '';
+                        this.splitStage.unitColumn = '';
+                        this.splitStage.quantityColumn = '';
+                        this.splitStage.numberColumn = '';
+                        return;
+                    }
+                    try {
+                        const payload = {
+                            google_sheet_id: this.extractSheetRef(this.splitStage.source).id,
+                            worksheet_gid: this.extractSheetRef(this.splitStage.source).gid,
+                        };
+                        const response = await fetch('/api/estimate/headers', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(payload),
+                        });
+                        const data = await response.json();
+                        if (data.success) {
+                            this.splitStage.headers = data.headers || [];
+                        } else {
+                            this.splitStage.headers = [];
+                        }
+                    } catch (error) {
+                        this.splitStage.headers = [];
                     }
                 },
             watch: {
@@ -2166,6 +2309,41 @@
                         }
                     } catch (error) {
                         this.estimateFormatResultV2 = { error: error.message };
+                    } finally {
+                        this.loading = false;
+                    }
+                },
+                async splitWorkMaterials() {
+                    this.loading = true;
+                    this.splitStageResult = null;
+                    try {
+                        const ref = this.extractSheetRef(this.splitStage.source);
+                        const column_map = {};
+                        if (this.splitStage.descriptionColumn) column_map.description = this.splitStage.descriptionColumn;
+                        if (this.splitStage.unitColumn) column_map.unit = this.splitStage.unitColumn;
+                        if (this.splitStage.quantityColumn) column_map.quantity = this.splitStage.quantityColumn;
+                        if (this.splitStage.numberColumn) column_map.number = this.splitStage.numberColumn;
+
+                        const payload = {
+                            google_sheet_id: ref.id,
+                            worksheet_gid: ref.gid,
+                            column_map: Object.keys(column_map).length ? column_map : undefined,
+                            context_tokens: 120000,
+                        };
+
+                        const response = await fetch('/api/estimate/split', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(payload),
+                        });
+                        const data = await response.json();
+                        if (data.success) {
+                            this.splitStageResult = data.result;
+                        } else {
+                            this.splitStageResult = { error: data.error || 'Не удалось выполнить разбиение' };
+                        }
+                    } catch (error) {
+                        this.splitStageResult = { error: error.message };
                     } finally {
                         this.loading = false;
                     }

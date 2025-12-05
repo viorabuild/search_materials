@@ -18,7 +18,7 @@ from flask import Flask, render_template, request, jsonify, send_from_directory
 from flask_cors import CORS
 from dotenv import load_dotenv
 
-from unified_agent import ConstructionAIAgent, ConstructionAIAgentConfig
+from unified_agent import ConstructionAIAgent, ConstructionAIAgentConfig, SPLIT_CONTEXT_TOKENS
 
 load_dotenv()
 
@@ -518,6 +518,42 @@ def import_estimate():
         })
     except Exception as e:
         logger.error("Error importing estimate: %s", e)
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/estimate/split', methods=['POST'])
+def split_estimate_rows():
+    """Разбить строки сметы на работы/материалы, добавляя строки под каждой."""
+    if not agent:
+        return jsonify({'error': 'Agent not initialized'}), 500
+
+    try:
+        data = request.get_json() or {}
+        google_sheet_id = data.get('google_sheet_id') or data.get('sheet_id')
+        if not google_sheet_id:
+            return jsonify({'error': 'google_sheet_id is required'}), 400
+
+        context_tokens = data.get('context_tokens')
+        try:
+            context_tokens = int(context_tokens) if context_tokens is not None else SPLIT_CONTEXT_TOKENS
+        except Exception:
+            context_tokens = SPLIT_CONTEXT_TOKENS
+
+        result = agent.split_work_materials(
+            google_sheet_id=google_sheet_id,
+            worksheet_name=data.get('google_worksheet') or data.get('worksheet'),
+            worksheet_gid=data.get('worksheet_gid'),
+            column_map=data.get('column_map'),
+            context_tokens=context_tokens,
+        )
+
+        return jsonify({
+            'success': True,
+            'result': result,
+            'timestamp': datetime.now().isoformat(),
+        })
+    except Exception as e:  # noqa: BLE001
+        logger.error("Error splitting estimate rows: %s", e)
         return jsonify({'error': str(e)}), 500
 
 
