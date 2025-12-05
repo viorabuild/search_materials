@@ -61,6 +61,7 @@ from estimate_constructor import (
     create_quick_estimate,
 )
 from estimate_importer import ExcelEstimateImporter
+from estimate_package_processor import EstimatePackageProcessor
 from cache_manager import CacheManager
 from markdown_ai import GoogleSheetsAI
 from local_materials_db import LocalMaterialDatabase
@@ -213,6 +214,8 @@ class ConstructionAIAgentConfig:
     project_chat_max_history_turns: int = 6
     enable_estimate_constructor: bool = True
     estimate_storage_path: str = "./data/estimates"
+    estimate_packages_dir: str = "./data/estimate_packages"
+    prefer_local_for_packages: bool = True
     
     @classmethod
     def from_env(cls) -> ConstructionAIAgentConfig:
@@ -238,6 +241,8 @@ class ConstructionAIAgentConfig:
 
         enable_estimate_constructor = os.getenv("ENABLE_ESTIMATE_CONSTRUCTOR", "true").lower() == "true"
         estimate_storage_path = os.getenv("ESTIMATE_STORAGE_PATH", "./data/estimates")
+        estimate_packages_dir = os.getenv("ESTIMATE_PACKAGES_DIR", "./data/estimate_packages")
+        prefer_local_for_packages = os.getenv("ESTIMATE_PACKAGES_LOCAL_ONLY", "true").lower() == "true"
 
         request_timeout_env = os.getenv("LLM_REQUEST_TIMEOUT_SECONDS")
         llm_request_timeout = float(request_timeout_env) if request_timeout_env else None
@@ -288,6 +293,8 @@ class ConstructionAIAgentConfig:
             project_chat_max_history_turns=int(os.getenv("PROJECT_CHAT_MAX_HISTORY_TURNS", "6")),
             enable_estimate_constructor=enable_estimate_constructor,
             estimate_storage_path=estimate_storage_path,
+            estimate_packages_dir=estimate_packages_dir,
+            prefer_local_for_packages=prefer_local_for_packages,
         )
 
 
@@ -514,6 +521,25 @@ class ConstructionAIAgent:
                 logger.warning("Failed to initialize project chat agent: %s", exc)
         else:
             logger.info("Project chat agent is disabled")
+
+        self.estimate_package_processor: Optional[EstimatePackageProcessor] = None
+        package_base_url = self.config.local_llm_base_url
+        if not package_base_url and self.config.prefer_local_for_packages:
+            package_base_url = "http://127.0.0.1:1234"
+        try:
+            self.estimate_package_processor = EstimatePackageProcessor(
+                storage_dir=Path(self.config.estimate_packages_dir),
+                local_model=self.config.local_llm_model,
+                local_base_url=package_base_url,
+                local_api_key=self.config.local_llm_api_key,
+                request_timeout=self.config.llm_request_timeout,
+            )
+            logger.info(
+                "Estimate package processor initialized (local model=%s)",
+                self.config.local_llm_model,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Estimate package processor not available: %s", exc)
 
         logger.info("ConstructionAIAgent initialized successfully")
 
@@ -2299,6 +2325,21 @@ class ConstructionAIAgent:
 
         return result
 
+    def process_estimate_package(
+        self,
+        zip_path: str,
+        reorganize: bool = True,
+    ) -> Dict[str, Any]:
+        """Распаковать архив со сметой, разложить файлы и добавить заметки."""
+        if not self.estimate_package_processor:
+            raise RuntimeError("Процессор архива сметы не инициализирован")
+        if not zip_path:
+            raise ValueError("Не указан путь к zip-архиву")
+        return self.estimate_package_processor.process_archive(
+            Path(zip_path),
+            reorganize=reorganize,
+        )
+
     def _format_estimate_v2(
         self,
         spreadsheet: gspread.Spreadsheet,
@@ -3499,6 +3540,12 @@ class ConstructionAIAgent:
                         if item.strip()
                     ]
                 ),
+            },
+            "packages": {
+                "enabled": self.estimate_package_processor is not None,
+                "storage_dir": str(self.config.estimate_packages_dir or ""),
+                "model": self.config.local_llm_model if self.estimate_package_processor else None,
+                "prefer_local": bool(self.config.prefer_local_for_packages),
             },
         }
 

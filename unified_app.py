@@ -521,6 +521,47 @@ def import_estimate():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/estimate/package', methods=['POST'])
+def process_estimate_package():
+    """Распаковать архив со сметой, разложить файлы и добавить заметки."""
+    if not agent:
+        return jsonify({'error': 'Agent not initialized'}), 500
+    if not getattr(agent, "estimate_package_processor", None):
+        return jsonify({'error': 'Estimate package processor not available'}), 503
+
+    try:
+        reorganize = True
+        zip_path: Path
+        upload = request.files.get("file") or request.files.get("archive")
+        if upload:
+            data = upload.read()
+            if not data:
+                return jsonify({'error': 'Файл пустой'}), 400
+            zip_path = agent.estimate_package_processor.stage_upload(
+                upload.filename or "archive.zip",
+                data,
+            )
+            reorganize = request.form.get("reorganize", "true").lower() != "false"
+        else:
+            payload = request.get_json(silent=True) or {}
+            raw_path = payload.get("zip_path") or payload.get("path")
+            if not raw_path:
+                return jsonify({'error': 'Передайте zip_path или файл'}), 400
+            zip_path = Path(raw_path)
+            reorganize = bool(payload.get("reorganize", True))
+
+        logger.info("Processing estimate package: %s", zip_path)
+        report = agent.process_estimate_package(str(zip_path), reorganize=reorganize)
+        return jsonify({
+            'success': True,
+            'report': report,
+            'timestamp': datetime.now().isoformat(),
+        })
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Error processing estimate package: %s", exc)
+        return jsonify({'error': str(exc)}), 500
+
+
 @app.route('/api/estimate/split', methods=['POST'])
 def split_estimate_rows():
     """Разбить строки сметы на работы/материалы, добавляя строки под каждой."""
