@@ -76,3 +76,24 @@ def test_import_from_gsheet_values(tmp_path: Path) -> None:
     assert estimate.metadata.name == "GSheet import"
     assert len(estimate.items) == 2
     assert estimate.items[0].total_price == 160  # 20 * 8
+
+
+def test_description_guess_prefers_text_over_numbers(tmp_path: Path) -> None:
+    constructor = EstimateConstructor(
+        llm_client=None,
+        llm_model="dummy",
+        material_agent=None,
+        storage_path=tmp_path,
+    )
+    importer = ExcelEstimateImporter(constructor)
+
+    headers = ["Artº Nº", "Designacao", "Unid"]
+    rows = [
+        ["1.1", "Porta interior", "un"],
+        ["1.2", "Janela de aluminio", "un"],
+    ]
+    df = importer.dataframe_from_values(headers, rows)
+    mapping = importer._build_mapping(list(df.columns), None, df=df)
+
+    assert mapping.get("number") == "Artº Nº"
+    assert mapping["description"] == "Designacao"

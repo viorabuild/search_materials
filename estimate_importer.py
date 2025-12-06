@@ -98,34 +98,48 @@ class ExcelEstimateImporter:
         default_item_type: ItemType | str = ItemType.WORK,
     ) -> Estimate:
         """Импорт из DataFrame (Excel/Google Sheets)."""
-        if column_map is not None and not isinstance(column_map, dict):
-            try:
-                import pandas as pd  # type: ignore
-
-                if isinstance(column_map, pd.Series):
-                    column_map = column_map.to_dict()
-                else:
-                    column_map = dict(column_map)
-            except Exception:
-                column_map = None
+        column_map = self._coerce_column_map(column_map)
         try:
             mapping = self._build_mapping(list(df.columns), df=df, column_map=column_map)
         except Exception as exc:
             logger.warning("Failed to build column mapping, using fallback: %s", exc)
             first_col = str(df.columns[0]) if len(df.columns) else "Описание"
             mapping = {"description": first_col}
-        items = self._rows_to_items(df, mapping, default_item_type=default_item_type)
+        try:
+            items = self._rows_to_items(df, mapping, default_item_type=default_item_type)
 
-        estimate_name = name or "Estimate Import"
-        estimate = self.constructor.create_estimate(
-            name=estimate_name,
-            description=description,
-            client_name=client_name,
-            currency=currency,
-        )
-        self.constructor.add_items_to_estimate(estimate.metadata.id, items)
-        logger.info("Imported estimate (items=%s, name=%s)", len(items), estimate_name)
-        return estimate
+            estimate_name = name or "Estimate Import"
+            estimate = self.constructor.create_estimate(
+                name=estimate_name,
+                description=description,
+                client_name=client_name,
+                currency=currency,
+            )
+            self.constructor.add_items_to_estimate(estimate.metadata.id, items)
+            logger.info("Imported estimate (items=%s, name=%s)", len(items), estimate_name)
+            return estimate
+        except ValueError as exc:
+            # Частые ошибки pandas "truth value of a Series is ambiguous" — уходим в безопасный режим
+            msg = str(exc).lower()
+            if "ambiguous" in msg or "truth value of a series" in msg:
+                logger.warning("DataFrame import hit ambiguous Series; retrying via rows fallback: %s", exc)
+                try:
+                    headers = [str(h) for h in df.columns]
+                    safe_rows = df.fillna("").values.tolist()
+                    return self.import_from_rows(
+                        headers=headers,
+                        rows=safe_rows,
+                        column_map=column_map,
+                        name=name,
+                        description=description,
+                        client_name=client_name,
+                        currency=currency,
+                        default_item_type=default_item_type,
+                    )
+                except Exception as fallback_exc:
+                    logger.warning("Rows fallback failed after ambiguous Series: %s", fallback_exc)
+                    raise fallback_exc
+            raise
 
     def import_from_rows(
         self,
@@ -139,6 +153,7 @@ class ExcelEstimateImporter:
         default_item_type: ItemType | str = ItemType.WORK,
     ) -> Estimate:
         """Импорт из простой матрицы (без pandas), используется как запасной путь."""
+        column_map = self._coerce_column_map(column_map)
         # Нормализуем заголовки
         norm_headers = [str(h or "").strip() for h in headers]
         mapping: Dict[str, str] = {}
@@ -243,8 +258,41 @@ class ExcelEstimateImporter:
         return self._normalize_headers_and_rows(df)
 
     def _normalize_headers_and_rows(self, df):
-        """Сдвинуть заголовок на первую непустую строку и привести названия колонок."""
-        # Найдём первую строку, где есть непустые значения
+        """Сдвинуть заголовок на первую непустую строку и привести названия колонок.
+
+        Если в DataFrame уже есть внятные заголовки (не только Unnamed/числа/col_N),
+        не переопределяем их первой строкой с данными — это важно для Google Sheets,
+        где заголовок уже передан отдельно (иначе «Описание» превращается в номера).
+        """
+        norm_columns = [str(col).strip() for col in df.columns]
+
+        def _is_placeholder(name: str, idx: int) -> bool:
+            if not name or name.lower() in {"nan", "none"}:
+                return True
+            low = name.lower()
+            if low.startswith("unnamed"):
+                return True
+            if low.startswith("col_"):
+                return True
+            if name == str(idx):
+                return True
+            try:
+                float(name.replace(",", "."))
+                return True
+            except Exception:
+                return False
+
+        placeholder_count = sum(_is_placeholder(name, idx) for idx, name in enumerate(norm_columns))
+        meaningful_headers = len(norm_columns) - placeholder_count
+
+        # Если большинство колонок уже названы осмысленно — оставляем их как есть
+        if meaningful_headers >= max(1, len(norm_columns) // 2):
+            cleaned = df.dropna(how="all").copy()
+            cleaned.columns = norm_columns
+            cleaned.columns = [str(col).strip() for col in cleaned.columns]
+            return cleaned.reset_index(drop=True)
+
+        # Иначе ищем строку-заголовок внутри данных (старое поведение)
         header_idx = None
         for idx, row in df.iterrows():
             row_values = [v for v in row.values if v is not None]
@@ -269,30 +317,54 @@ class ExcelEstimateImporter:
     def _normalize(self, value: Any) -> str:
         return str(value).strip().lower()
 
-    def _build_mapping(self, columns: List[str], column_map: Optional[Dict[str, str]], df=None) -> Dict[str, str]:
-        # Приведём карту в словарь, чтобы избежать truthiness-проверок pandas.Series
-        if column_map is not None and not isinstance(column_map, dict):
-            try:
-                import pandas as pd  # type: ignore
+    def _coerce_column_map(self, column_map: Any) -> Optional[Dict[str, str]]:
+        """Привести карту колонок к словарю str->str, избегая pandas Series/DataFrame."""
+        if column_map is None:
+            return None
+        # Пробуем быстрый путь: уже dict
+        if isinstance(column_map, dict):
+            cleaned = {}
+            for key, val in column_map.items():
+                if val is None:
+                    continue
+                sval = str(val).strip()
+                if not sval:
+                    continue
+                cleaned[str(key).strip()] = sval
+            return cleaned or None
+        try:
+            import pandas as pd  # type: ignore
 
-                if isinstance(column_map, pd.Series):
-                    column_map = column_map.to_dict()
-                else:
-                    column_map = dict(column_map)
-            except Exception:
-                column_map = None
+            if isinstance(column_map, pd.Series):
+                return self._coerce_column_map(column_map.to_dict())
+            if isinstance(column_map, pd.DataFrame):
+                if len(column_map) >= 1:
+                    return self._coerce_column_map(column_map.iloc[0].to_dict())
+                return None
+        except Exception:
+            pass
+
+        try:
+            tentative = dict(column_map)
+            return self._coerce_column_map(tentative)
+        except Exception:
+            return None
+
+    def _build_mapping(self, columns: List[str], column_map: Optional[Dict[str, str]], df=None) -> Dict[str, str]:
+        column_map = self._coerce_column_map(column_map)
 
         mapping: Dict[str, str] = {}
         normalized = {col: self._normalize(col) for col in columns}
 
         # Явная карта пользователя имеет приоритет
-        if column_map is not None:
+        if column_map:
             for key, col in column_map.items():
-                if col in columns:
-                    mapping[key] = col
+                col_name = str(col).strip()
+                if col_name in columns:
+                    mapping[key] = col_name
                 else:
                     # пробуем по нормализованному варианту
-                    match = next((orig for orig, norm in normalized.items() if norm == self._normalize(col)), None)
+                    match = next((orig for orig, norm in normalized.items() if norm == self._normalize(col_name)), None)
                     if match:
                         mapping[key] = match
 
@@ -331,7 +403,7 @@ class ExcelEstimateImporter:
             return None
 
         best_col = None
-        best_score = -1
+        best_score = (-1, -1)  # (has_text_flag, score_value)
         for col in columns:
             if col in excluded:
                 continue
@@ -355,8 +427,9 @@ class ExcelEstimateImporter:
                 if len(sval) <= 2:
                     continue
                 text_like += 1
-            # Если нет явного текста, используем разнообразие значений
-            score = text_like if text_like > 0 else len(unique_nonempty)
+            # Предпочитаем колонки с текстом; при равенстве выигрывает та, где есть текст
+            has_text = int(text_like > 0)
+            score = (has_text, text_like if has_text else len(unique_nonempty))
             if score > best_score:
                 best_score = score
                 best_col = col

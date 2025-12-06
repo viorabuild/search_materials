@@ -68,13 +68,18 @@ class EstimatePackageProcessor:
         base_url: Optional[str],
         api_key: str,
         timeout: Optional[float],
-    ) -> OpenAI:
+    ) -> Optional[OpenAI]:
         if not base_url:
-            raise RuntimeError(
-                "LOCAL_LLM_BASE_URL не задан. Для просчёта смет нужен локальный LM Studio с qwen/qwen3-vl-4b."
+            logger.warning(
+                "LOCAL_LLM_BASE_URL не задан. Просчёт архива будет без анализа файлов (только распаковка)."
             )
-        normalized = _normalize_base_url(base_url)
-        return OpenAI(api_key=api_key or "lm-studio", base_url=normalized, timeout=timeout)
+            return None
+        try:
+            normalized = _normalize_base_url(base_url)
+            return OpenAI(api_key=api_key or "lm-studio", base_url=normalized, timeout=timeout)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Не удалось инициализировать локальную LLM: %s", exc)
+            return None
 
     # ------------------------------------------------------------------ публичные методы
     def process_archive(
@@ -105,23 +110,23 @@ class EstimatePackageProcessor:
         for file_path in files:
             try:
                 summary, snippet = self._analyze_file(file_path, root=extracted_dir)
-                note_path = self._write_note(file_path, summary, snippet, root=extracted_dir)
-                results.append(
-                    {
-                        "file": str(file_path.relative_to(extracted_dir)),
-                        "note": str(note_path.relative_to(extracted_dir)),
-                        "size_bytes": file_path.stat().st_size,
-                        "category": self._detect_category(file_path),
-                    }
-                )
             except Exception as exc:  # noqa: BLE001
-                logger.warning("Не удалось обработать %s: %s", file_path, exc)
-                results.append(
-                    {
-                        "file": str(file_path.relative_to(extracted_dir)),
-                        "error": str(exc),
-                    }
-                )
+                summary = f"Не удалось проанализировать файл: {exc}"
+                snippet = ""
+            try:
+                note_path = self._write_note(file_path, summary, snippet, root=extracted_dir)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Не удалось записать заметку для %s: %s", file_path, exc)
+                note_path = None
+
+            results.append(
+                {
+                    "file": str(file_path.relative_to(extracted_dir)),
+                    "note": str(note_path.relative_to(extracted_dir)) if note_path else None,
+                    "size_bytes": file_path.stat().st_size,
+                    "category": self._detect_category(file_path),
+                }
+            )
 
         report_path = package_root / "package_report.json"
         report_payload = {
@@ -304,6 +309,9 @@ class EstimatePackageProcessor:
             },
             {"role": "user", "content": "\n".join(user_payload)},
         ]
+        if not self._client:
+            summary = "Анализ пропущен: локальная модель не настроена. Файл распакован."
+            return summary, preview
         try:
             response = self._client.chat.completions.create(
                 model=self.local_model,
@@ -333,4 +341,3 @@ class EstimatePackageProcessor:
         ]
         note_path.write_text("\n".join(lines), encoding="utf-8")
         return note_path
-

@@ -1618,7 +1618,10 @@ class ConstructionAIAgent:
             if unit_price_val == 0:
                 unit_price_val = ""
 
-            total_formula = f"=IF(AND(ISNUMBER(E{sheet_row}),ISNUMBER(F{sheet_row})),E{sheet_row}*F{sheet_row},\"\")"
+            # Для европейских локалей Google Sheets формулы ожидают ; вместо ,
+            total_formula = (
+                f"=IF(AND(ISNUMBER(E{sheet_row});ISNUMBER(F{sheet_row}));E{sheet_row}*F{sheet_row};\"\")"
+            )
             if item.get("is_section"):
                 section_rows.append(sheet_row)
                 qty_val = ""
@@ -2358,6 +2361,7 @@ class ConstructionAIAgent:
         translate_from: str,
         translate_to: str,
         translation_context_tokens: int,
+        rewrite_source_sheet: bool,
     ) -> Dict[str, Any]:
         """Создать лист «Формат 2» с переводом и разметкой."""
         headers = values[0] if values else []
@@ -2406,7 +2410,10 @@ class ConstructionAIAgent:
                 llm_model=self.config.llm_model,
             )
 
-        sheet_title = f"{worksheet.title} — Формат 2"
+        if rewrite_source_sheet:
+            sheet_title = worksheet.title
+        else:
+            sheet_title = f"{worksheet.title} — Формат 2"
         prepared = self._prepare_worksheet(
             target_ai,
             sheet_title,
@@ -2732,6 +2739,11 @@ class ConstructionAIAgent:
         if translation_context_tokens <= 0:
             translation_context_tokens = FORMAT2_DEFAULT_CONTEXT_TOKENS
 
+        # Формат 2 по умолчанию переписывает текущий лист, если явно не попросили новый
+        if format_version == 2 and not create_new_spreadsheet and not target_spreadsheet_id:
+            if not rewrite_source_sheet:
+                rewrite_source_sheet = True
+
         if format_version == 2:
             return self._format_estimate_v2(
                 spreadsheet=spreadsheet,
@@ -2749,6 +2761,7 @@ class ConstructionAIAgent:
                 translate_from=translate_from,
                 translate_to=translate_to,
                 translation_context_tokens=translation_context_tokens,
+                rewrite_source_sheet=rewrite_source_sheet,
             )
 
         headers = values[0] if values else []
