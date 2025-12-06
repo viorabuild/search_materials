@@ -98,8 +98,16 @@ class ExcelEstimateImporter:
         default_item_type: ItemType | str = ItemType.WORK,
     ) -> Estimate:
         """Импорт из DataFrame (Excel/Google Sheets)."""
-        if column_map and not isinstance(column_map, dict):
-            column_map = None
+        if column_map is not None and not isinstance(column_map, dict):
+            try:
+                import pandas as pd  # type: ignore
+
+                if isinstance(column_map, pd.Series):
+                    column_map = column_map.to_dict()
+                else:
+                    column_map = dict(column_map)
+            except Exception:
+                column_map = None
         try:
             mapping = self._build_mapping(list(df.columns), df=df, column_map=column_map)
         except Exception as exc:
@@ -262,11 +270,23 @@ class ExcelEstimateImporter:
         return str(value).strip().lower()
 
     def _build_mapping(self, columns: List[str], column_map: Optional[Dict[str, str]], df=None) -> Dict[str, str]:
+        # Приведём карту в словарь, чтобы избежать truthiness-проверок pandas.Series
+        if column_map is not None and not isinstance(column_map, dict):
+            try:
+                import pandas as pd  # type: ignore
+
+                if isinstance(column_map, pd.Series):
+                    column_map = column_map.to_dict()
+                else:
+                    column_map = dict(column_map)
+            except Exception:
+                column_map = None
+
         mapping: Dict[str, str] = {}
         normalized = {col: self._normalize(col) for col in columns}
 
         # Явная карта пользователя имеет приоритет
-        if column_map:
+        if column_map is not None:
             for key, col in column_map.items():
                 if col in columns:
                     mapping[key] = col
