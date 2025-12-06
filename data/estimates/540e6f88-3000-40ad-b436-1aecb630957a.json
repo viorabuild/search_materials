@@ -1,0 +1,59 @@
+{
+  "metadata": {
+    "id": "540e6f88-3000-40ad-b436-1aecb630957a",
+    "name": "Medições_Charneca (копия)",
+    "description": "",
+    "client_name": "",
+    "client_contact": "",
+    "project_address": "",
+    "created_at": 1764987032.2859619,
+    "updated_at": 1764987032.2862349,
+    "status": "draft",
+    "currency": "€",
+    "discount_percent": 0.0,
+    "tax_percent": 0.0,
+    "notes": "",
+    "template_id": null
+  },
+  "items": [
+    {
+      "id": "fee779ac-8222-4759-8bb1-668af8990a37",
+      "name": "I - MOVIMENTOS DE TERRAS",
+      "description": "I - MOVIMENTOS DE TERRAS",
+      "item_type": "work",
+      "quantity": 0.0,
+      "unit": "шт",
+      "unit_price": 0.0,
+      "total_price": 0.0,
+      "code": "",
+      "supplier": "",
+      "supplier_url": "",
+      "notes": "",
+      "created_at": 1764987032.285907,
+      "updated_at": 1764987032.285907
+    },
+    {
+      "id": "5c8072e1-276c-4d7e-abd1-46aa14ae63ff",
+      "name": "Limpeza do terreno e escavação para colocação do pavimento existente às cotas do Projecto. As terras decorrentes da escavação serão reservados no terreno para posterior aterro na envolvente do edficio, a confirmar com os lotes confinantes em fase de obra.",
+      "description": "Limpeza do terreno e escavação para colocação do pavimento existente às cotas do Projecto. As terras decorrentes da escavação serão reservados no terreno para posterior aterro na envolvente do edficio, a confirmar com os lotes confinantes em fase de obra.",
+      "item_type": "work",
+      "quantity": 1.0,
+      "unit": "Vg",
+      "unit_price": 0.0,
+      "total_price": 0.0,
+      "code": "1.1",
+      "supplier": "",
+      "supplier_url": "",
+      "notes": "",
+      "created_at": 1764987032.285954,
+      "updated_at": 1764987032.285954
+    }
+  ],
+  "summary": {
+    "subtotal": 0.0,
+    "discount": 0.0,
+    "tax": 0.0,
+    "total": 0.0,
+    "items_count": 2
+  }
+}

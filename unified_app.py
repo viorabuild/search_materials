@@ -461,7 +461,11 @@ def import_estimate():
         path = data.get('path')
         google_sheet_id = data.get('google_sheet_id') or data.get('sheet_id')
         format_version = int(data.get('format_version', 1)) if str(data.get('format_version', '1')).strip().isdigit() else 1
-        translate = bool(data.get('translate', False))
+        translate_raw = data.get('translate', None)
+        if translate_raw is None:
+            translate = format_version == 2  # авто-перевод для Формат 2, если не указали явно
+        else:
+            translate = bool(translate_raw)
         translate_from = data.get('translate_from') or "pt"
         translate_to = data.get('translate_to') or "ru"
         try:

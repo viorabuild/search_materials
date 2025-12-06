@@ -1633,7 +1633,20 @@ class ConstructionAIAgent:
             )
             content = completion.choices[0].message.content or "{}"
             parsed = json.loads(content)
-            return parsed.get("translations") or parsed
+            normalized = self._normalize_translation_payload(parsed)
+            if not normalized:
+                salvage = self._salvage_translations_from_text(content)
+                if salvage:
+                    return salvage
+                logger.info(
+                    "Translation batch returned empty map (items=%d, tokens≈%d, raw_len=%d). Content sample: %s",
+                    len(batch),
+                    max_tokens,
+                    len(content or ""),
+                    (content or "")[:300],
+                )
+                return self._translate_format2_items_individually(batch, source_lang, target_lang)
+            return normalized
         except Exception as exc:  # noqa: BLE001
             message = str(exc).lower()
             logger.warning("Translation batch failed: %s", exc)
@@ -1687,6 +1700,14 @@ class ConstructionAIAgent:
                 self._translate_format2_batch(batch, source_lang, target_lang, max_tokens=approx_limit)
             )
 
+        if not translations:
+            logger.warning(
+                "Format2 translation produced empty map (items=%d). Falling back to per-item translation.",
+                len(items),
+            )
+            # крайний случай: поштучно
+            translations = self._translate_format2_items_individually(items, source_lang, target_lang)
+
         return translations
 
     def _salvage_translations_from_text(self, text: str) -> Dict[str, str]:
@@ -1722,6 +1743,44 @@ class ConstructionAIAgent:
                     if key.isdigit() and val:
                         salvage[key] = val
         return salvage
+
+    def _normalize_translation_payload(self, payload: Any) -> Dict[str, str]:
+        """Привести ответ модели к словарю id->перевод."""
+        if payload is None:
+            return {}
+        if isinstance(payload, dict):
+            if "translations" in payload and isinstance(payload["translations"], dict):
+                return {
+                    str(k): str(v) for k, v in payload["translations"].items() if isinstance(v, str)
+                }
+            # Уже мапа?
+            if all(isinstance(k, (str, int)) and isinstance(v, str) for k, v in payload.items()):
+                return {str(k): v for k, v in payload.items()}
+            # Возможно список внутри
+            for value in payload.values():
+                if isinstance(value, list):
+                    as_map = self._list_to_translation_map(value)
+                    if as_map:
+                        return as_map
+        if isinstance(payload, list):
+            return self._list_to_translation_map(payload)
+        return {}
+
+    def _list_to_translation_map(self, items: List[Any]) -> Dict[str, str]:
+        """Конвертировать список объектов в словарь переводов."""
+        result: Dict[str, str] = {}
+        for entry in items:
+            if not isinstance(entry, dict):
+                continue
+            key = entry.get("id") or entry.get("key") or entry.get("index")
+            val = entry.get("translation") or entry.get("text") or entry.get("name_en") or entry.get("value")
+            if key is None or val is None:
+                continue
+            key_str = str(key).strip()
+            val_str = str(val).strip()
+            if key_str and val_str:
+                result[key_str] = val_str
+        return result
 
     def _translate_format2_items_individually(
         self,
@@ -2913,7 +2972,7 @@ class ConstructionAIAgent:
         target_spreadsheet_id: Optional[str] = None,
         rewrite_source_sheet: bool = False,
         format_version: int = 1,
-        translate: bool = False,
+        translate: Optional[bool] = None,
         translate_from: str = "pt",
         translate_to: str = "ru",
         translation_context_tokens: int = FORMAT2_DEFAULT_CONTEXT_TOKENS,
@@ -2965,6 +3024,9 @@ class ConstructionAIAgent:
             translation_context_tokens = FORMAT2_DEFAULT_CONTEXT_TOKENS
         if translation_context_tokens > FORMAT2_DEFAULT_CONTEXT_TOKENS:
             translation_context_tokens = FORMAT2_DEFAULT_CONTEXT_TOKENS
+
+        if translate is None:
+            translate = format_version == 2
 
         # Формат 2 по умолчанию переписывает текущий лист, если явно не попросили новый
         if format_version == 2 and not create_new_spreadsheet and not target_spreadsheet_id:
