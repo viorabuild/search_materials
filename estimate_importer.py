@@ -8,6 +8,7 @@ Excel → Estimate converter.
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
@@ -378,6 +379,72 @@ class ExcelEstimateImporter:
             )
             if match:
                 mapping[field] = match
+
+        # Подсказка количества по данным (если не нашли по названию)
+        if "quantity" not in mapping and df is not None:
+            candidates: list[tuple[int, int, str]] = []
+            for idx, col in enumerate(columns):
+                if col in mapping.values():
+                    continue
+                norm = normalized.get(col, "")
+                if any(key in norm for key in ("id", "master", "код", "code", "ref", "art")):
+                    continue
+                series = df[col]
+                numeric_count = 0
+                non_empty = 0
+                for val in series:
+                    if val is None or str(val).strip() == "":
+                        continue
+                    non_empty += 1
+                    sval = str(val)
+                    try:
+                        float(
+                            sval.replace("€", "")
+                            .replace(" ", "")
+                            .replace("\u00a0", "")
+                            .replace(",", ".")
+                        )
+                        numeric_count += 1
+                    except Exception:
+                        continue
+                if non_empty and numeric_count >= max(1, int(non_empty * 0.6)):
+                    # При равенстве количества чисел берем самый левый столбец
+                    candidates.append((numeric_count, -idx, col))
+            if candidates:
+                candidates.sort(reverse=True)
+                mapping["quantity"] = candidates[0][2]
+
+        # Подсказка номера позиции (№) по данным, если не нашли по заголовку
+        if "number" not in mapping and df is not None:
+            candidates_num: list[tuple[int, int, str]] = []
+            for idx, col in enumerate(columns):
+                if col in mapping.values():
+                    continue
+                series = df[col]
+                score = 0
+                non_empty = 0
+                for val in series:
+                    if val is None or str(val).strip() == "":
+                        continue
+                    sval = str(val).strip()
+                    if any(sym in sval for sym in ("€", "$", "руб", "eur", "usd")):
+                        continue
+                    if len(sval) > 12:
+                        continue
+                    if re.search(r"[A-Za-z]", sval):
+                        continue
+                    non_empty += 1
+                    if re.fullmatch(r"\d+(\.\d+)+", sval):
+                        score += 3  # иерархическая нумерация 1.1.2
+                    elif re.fullmatch(r"\d+[.,]\d+", sval):
+                        score += 1  # дробные числа, например 1,1
+                    elif re.fullmatch(r"\d+", sval) and len(sval) <= 4:
+                        score += 1  # короткие целые
+                if score and non_empty:
+                    candidates_num.append((score, -idx, col))
+            if candidates_num:
+                candidates_num.sort(reverse=True)
+                mapping["number"] = candidates_num[0][2]
 
         if "description" not in mapping:
             guessed = self._guess_description_column(columns, column_map, df=df)

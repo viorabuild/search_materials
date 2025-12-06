@@ -81,6 +81,19 @@ if TYPE_CHECKING:
 load_dotenv()
 logger = logging.getLogger(__name__)
 
+
+def _json_schema_format(name: str, schema: Dict[str, Any], *, strict: bool = False) -> Dict[str, Any]:
+    """Build a json_schema response_format payload compatible with new OpenAI-style APIs."""
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": name,
+            "schema": schema,
+            "strict": strict,
+        },
+    }
+
+
 FORMAT2_DEFAULT_CONTEXT_TOKENS = 30000
 FORMAT2_HEADER_COLOR = {"red": 12 / 255, "green": 48 / 255, "blue": 46 / 255}
 SPLIT_CONTEXT_TOKENS = 120000
@@ -1295,7 +1308,39 @@ class ConstructionAIAgent:
         try:
             completion = self.openai_client.chat.completions.create(
                 model=self.config.llm_model,
-                response_format={"type": "json_object"},
+                response_format=_json_schema_format(
+                    "estimate_table",
+                    {
+                        "type": "object",
+                        "properties": {
+                            "section_title": {"type": "string"},
+                            "currency": {"type": "string"},
+                            "iva_percent": {"type": ["integer", "number", "string"]},
+                            "items": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "number": {"type": "string"},
+                                        "description": {"type": "string"},
+                                        "unit": {"type": "string"},
+                                        "quantity": {"type": ["number", "string"]},
+                                        "unit_price": {"type": ["number", "string"]},
+                                        "total": {"type": ["number", "string", "null"]},
+                                    },
+                                    "required": ["description"],
+                                    "additionalProperties": True,
+                                },
+                            },
+                            "notes": {"type": "array", "items": {"type": "string"}},
+                            "variant": {"type": ["string", "null"]},
+                            "labels": {"type": ["object", "null"]},
+                        },
+                        "required": ["items"],
+                        "additionalProperties": True,
+                    },
+                    strict=False,
+                ),
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
@@ -1462,8 +1507,10 @@ class ConstructionAIAgent:
                 code = str(code_val or "").strip()
 
             number = ""
+            number_raw: Any = ""
             if "number" in mapping:
                 num_val = row.get(mapping["number"], "")
+                number_raw = num_val
                 number = str(num_val or "").strip()
 
             unit = ""
@@ -1474,7 +1521,28 @@ class ConstructionAIAgent:
             qty = self.estimate_importer._to_float(row.get(mapping.get("quantity", ""), 0.0))
             unit_price = self.estimate_importer._to_float(row.get(mapping.get("unit_price", ""), 0.0))
 
-            is_section = self._is_integer_like(number) and not unit and qty == 0 and unit_price == 0
+            def _looks_like_int(value: str) -> bool:
+                cleaned = value.replace(" ", "").replace("\u00a0", "")
+                if cleaned.endswith(".") or cleaned.endswith(","):
+                    cleaned = cleaned[:-1]
+                if "." in cleaned or "," in cleaned or not cleaned:
+                    return False
+                return cleaned.isdigit()
+
+            is_section = False
+            if not unit.strip():
+                try:
+                    if isinstance(number_raw, (int, float)) and float(number_raw).is_integer():
+                        is_section = True
+                    elif number and _looks_like_int(number):
+                        is_section = True
+                except Exception:
+                    is_section = False
+
+            if is_section:
+                qty = 0.0
+                unit_price = 0.0
+                unit = ""
 
             items.append({
                 "translation_id": str(len(items)),
@@ -1541,7 +1609,20 @@ class ConstructionAIAgent:
                     {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
                 ],
                 temperature=0.2,
-                response_format={"type": "json_object"},
+                response_format=_json_schema_format(
+                    "format2_translations",
+                    {
+                        "type": "object",
+                        "properties": {
+                            "translations": {
+                                "type": "object",
+                                "additionalProperties": {"type": "string"},
+                            }
+                        },
+                        "additionalProperties": {"type": "string"},
+                    },
+                    strict=False,
+                ),
                 max_tokens=max_tokens,
             )
             content = completion.choices[0].message.content or "{}"
@@ -1564,7 +1645,7 @@ class ConstructionAIAgent:
 
         translations: Dict[str, str] = {}
         batch: List[Dict[str, Any]] = []
-        approx_limit = max(1000, context_tokens)
+        approx_limit = min(max(1000, context_tokens), FORMAT2_DEFAULT_CONTEXT_TOKENS)
         current_tokens = 0
 
         for item in items:
@@ -1611,12 +1692,17 @@ class ConstructionAIAgent:
             sheet_row = len(rows) + 1
             translation = translations.get(item.get("translation_id", ""), "")
 
+            number_display = item.get("number") or str(idx)
+            try:
+                if self._is_integer_like(number_display):
+                    num_f = float(str(number_display).replace(",", "."))
+                    if num_f.is_integer():
+                        number_display = str(int(num_f))
+            except Exception:
+                pass
+
             qty_val: Any = item.get("quantity", "")
-            if qty_val == 0:
-                qty_val = ""
             unit_price_val: Any = item.get("unit_price", "")
-            if unit_price_val == 0:
-                unit_price_val = ""
 
             # Для европейских локалей Google Sheets формулы ожидают ; вместо ,
             total_formula = (
@@ -1630,7 +1716,7 @@ class ConstructionAIAgent:
 
             rows.append([
                 item.get("code") or "",
-                item.get("number") or str(idx),
+                number_display,
                 item.get("description") or "",
                 item.get("unit") or "",
                 qty_val,
@@ -1682,6 +1768,11 @@ class ConstructionAIAgent:
                         {"alignment": "CENTER", "verticalAlignment": "MIDDLE"},
                         worksheet_name=worksheet.title,
                     )
+                sheets_ai.format_range(
+                    f"B2:B{rows_count}",
+                    {"numberFormat": {"type": "TEXT"}},
+                    worksheet_name=worksheet.title,
+                )
                 for col in ("C", "H"):
                     sheets_ai.format_range(
                         f"{col}2:{col}{rows_count}",
@@ -2543,7 +2634,43 @@ class ConstructionAIAgent:
                 ],
                 temperature=0.35,
                 max_tokens=1800,
-                response_format={"type": "json_object"},
+                response_format=_json_schema_format(
+                    "estimate_split",
+                    {
+                        "type": "object",
+                        "properties": {
+                            "rows": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "source_row": {"type": ["integer", "number"]},
+                                        "items": {
+                                            "type": "array",
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "type": {"type": "string"},
+                                                    "number": {"type": "string"},
+                                                    "description": {"type": "string"},
+                                                    "unit": {"type": "string"},
+                                                    "quantity": {"type": ["number", "string"]},
+                                                },
+                                                "required": ["description"],
+                                                "additionalProperties": True,
+                                            },
+                                        },
+                                    },
+                                    "required": ["source_row", "items"],
+                                    "additionalProperties": True,
+                                },
+                            },
+                        },
+                        "required": ["rows"],
+                        "additionalProperties": True,
+                    },
+                    strict=False,
+                ),
             )
             content = completion.choices[0].message.content or "{}"
             parsed = json.loads(content)
@@ -2737,6 +2864,8 @@ class ConstructionAIAgent:
         except Exception:
             translation_context_tokens = FORMAT2_DEFAULT_CONTEXT_TOKENS
         if translation_context_tokens <= 0:
+            translation_context_tokens = FORMAT2_DEFAULT_CONTEXT_TOKENS
+        if translation_context_tokens > FORMAT2_DEFAULT_CONTEXT_TOKENS:
             translation_context_tokens = FORMAT2_DEFAULT_CONTEXT_TOKENS
 
         # Формат 2 по умолчанию переписывает текущий лист, если явно не попросили новый

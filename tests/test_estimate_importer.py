@@ -97,3 +97,24 @@ def test_description_guess_prefers_text_over_numbers(tmp_path: Path) -> None:
 
     assert mapping.get("number") == "Artº Nº"
     assert mapping["description"] == "Designacao"
+
+
+def test_quantity_fallback_picks_numeric_column(tmp_path: Path) -> None:
+    constructor = EstimateConstructor(
+        llm_client=None,
+        llm_model="dummy",
+        material_agent=None,
+        storage_path=tmp_path,
+    )
+    importer = ExcelEstimateImporter(constructor)
+
+    headers = ["Col1", "Col2", "Col3"]
+    rows = [
+        ["Work A", "12", "100"],
+        ["Work B", "5", "200"],
+    ]
+    df = importer.dataframe_from_values(headers, rows)
+    mapping = importer._build_mapping(list(df.columns), None, df=df)
+
+    assert mapping["description"] == "Col1"
+    assert mapping["quantity"] == "Col2"

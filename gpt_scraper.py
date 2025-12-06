@@ -24,6 +24,18 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 logger = logging.getLogger(__name__)
 
 
+def _json_schema_format(name: str, schema: dict, strict: bool = False) -> dict:
+    """Return a json_schema response_format payload compatible with OpenAI-style APIs."""
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": name,
+            "schema": schema,
+            "strict": strict,
+        },
+    }
+
+
 class ProductInfo(BaseModel):
     """Product information extracted by GPT."""
     name: str = Field(..., description="Product name")
@@ -177,6 +189,38 @@ Return a JSON array of products found. Example format:
 If no products found, return empty array: []
 """
 
+        response_format = None
+        if "gpt-4" in self.model:
+            product_schema = {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "price": {"type": "string"},
+                    "url": {"type": "string"},
+                    "supplier": {"type": ["string", "null"]},
+                    "description": {"type": ["string", "null"]},
+                    "in_stock": {"type": ["boolean", "string", "null"]},
+                },
+                "required": ["name", "price", "url"],
+                "additionalProperties": True,
+            }
+            response_format = _json_schema_format(
+                "product_list",
+                {
+                    "anyOf": [
+                        {"type": "array", "items": product_schema},
+                        {
+                            "type": "object",
+                            "properties": {
+                                "products": {"type": "array", "items": product_schema},
+                            },
+                            "additionalProperties": True,
+                        },
+                    ]
+                },
+                strict=False,
+            )
+
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -185,7 +229,7 @@ If no products found, return empty array: []
                     {"role": "user", "content": user_prompt}
                 ],
                 temperature=0.1,
-                response_format={"type": "json_object"} if "gpt-4" in self.model else None
+                response_format=response_format
             )
             
             content = response.choices[0].message.content
