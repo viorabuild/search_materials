@@ -1707,6 +1707,11 @@ class ConstructionAIAgent:
             )
             # крайний случай: поштучно
             translations = self._translate_format2_items_individually(items, source_lang, target_lang)
+        logger.info(
+            "Format2 translation result: %d/%d items have translations.",
+            len([v for v in translations.values() if v]),
+            len(items),
+        )
 
         return translations
 
@@ -1749,6 +1754,17 @@ class ConstructionAIAgent:
         if payload is None:
             return {}
         if isinstance(payload, dict):
+            # Кейc "id" + одно поле с переводом
+            if "id" in payload and any(key in payload for key in ("translation", "text", "name_en", "value")):
+                key = str(payload.get("id") or "").strip()
+                val = (
+                    payload.get("translation")
+                    or payload.get("text")
+                    or payload.get("name_en")
+                    or payload.get("value")
+                )
+                if key and isinstance(val, str) and val.strip():
+                    return {key: val.strip()}
             if "translations" in payload and isinstance(payload["translations"], dict):
                 return {
                     str(k): str(v) for k, v in payload["translations"].items() if isinstance(v, str)
@@ -2636,8 +2652,31 @@ class ConstructionAIAgent:
                 target_lang=translate_to or "ru",
                 context_tokens=translation_context_tokens or FORMAT2_DEFAULT_CONTEXT_TOKENS,
             )
+            translated_count = len([v for v in translations.values() if v])
+            logger.info(
+                "Format2: translations prepared: %d/%d items (map_size=%d).",
+                translated_count,
+                len(items),
+                len(translations),
+            )
 
         rows, section_rows = self._build_format2_rows(items, translations)
+        if rows:
+            sample_rows = rows[1:4]
+            logger.info(
+                "Format2 sample rows (first up to 3): %s",
+                [
+                    {
+                        "number": r[1] if len(r) > 1 else "",
+                        "description": r[2] if len(r) > 2 else "",
+                        "translation": r[7] if len(r) > 7 else "",
+                    }
+                    for r in sample_rows
+                ],
+            )
+        if translations:
+            preview = list(translations.items())[:5]
+            logger.info("Format2 translations preview (first 5): %s", preview)
 
         client = self._ensure_gspread_client()
         target_spreadsheet = spreadsheet
@@ -2675,6 +2714,14 @@ class ConstructionAIAgent:
             pass
 
         self._apply_format2_formatting(target_ai, prepared, section_rows, len(rows))
+
+        logger.info(
+            "Format2 writing rows: target='%s', worksheet='%s', rows=%d, sections=%d.",
+            target_spreadsheet.title if target_spreadsheet else "unknown",
+            prepared.title if prepared else "unknown",
+            len(rows),
+            len(section_rows),
+        )
 
         gid = getattr(prepared, "id", None) or prepared._properties.get("sheetId")
         sheet_url = f"https://docs.google.com/spreadsheets/d/{target_spreadsheet.id}/edit#gid={gid}"
@@ -2920,6 +2967,11 @@ class ConstructionAIAgent:
         apply_total_formulas()
 
         worksheet.update("A1", output_rows, value_input_option="USER_ENTERED")
+        logger.info(
+            "Split output written: sheet='%s', rows=%d.",
+            worksheet.title,
+            len(output_rows),
+        )
         try:
             apply_format2 = len(headers) >= 8 and str(headers[0]).lower().startswith("id")
             if apply_format2:
