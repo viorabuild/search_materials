@@ -97,6 +97,8 @@ def _json_schema_format(name: str, schema: Dict[str, Any], *, strict: bool = Fal
 FORMAT2_DEFAULT_CONTEXT_TOKENS = 30000
 FORMAT2_HEADER_COLOR = {"red": 12 / 255, "green": 48 / 255, "blue": 46 / 255}
 SPLIT_CONTEXT_TOKENS = 120000
+FORMAT2_TRANSLATION_BATCH_LIMIT = 8000
+FORMAT2_TRANSLATION_RESPONSE_TOKENS = 4000
 
 
 MATERIAL_SEARCH_REQUESTS = Counter(
@@ -1600,6 +1602,10 @@ class ConstructionAIAgent:
         }
 
         max_tokens = max(800, min(int(max_tokens or FORMAT2_DEFAULT_CONTEXT_TOKENS), FORMAT2_DEFAULT_CONTEXT_TOKENS))
+        response_max_tokens = min(FORMAT2_TRANSLATION_RESPONSE_TOKENS, max_tokens)
+        if max_tokens > FORMAT2_TRANSLATION_BATCH_LIMIT:
+            max_tokens = FORMAT2_TRANSLATION_BATCH_LIMIT
+        content = ""
         try:
             LLM_REQUESTS.inc()
             completion = self.openai_client.chat.completions.create(
@@ -1623,14 +1629,28 @@ class ConstructionAIAgent:
                     },
                     strict=False,
                 ),
-                max_tokens=max_tokens,
+                max_tokens=response_max_tokens,
             )
             content = completion.choices[0].message.content or "{}"
             parsed = json.loads(content)
             return parsed.get("translations") or parsed
         except Exception as exc:  # noqa: BLE001
+            message = str(exc).lower()
             logger.warning("Translation batch failed: %s", exc)
-            return {}
+            if len(batch) > 1 and ("context" in message or "token" in message):
+                mid = max(1, len(batch) // 2)
+                left = self._translate_format2_batch(batch[:mid], source_lang, target_lang, max_tokens // 2)
+                right = self._translate_format2_batch(batch[mid:], source_lang, target_lang, max_tokens // 2)
+                merged = {}
+                merged.update(left)
+                merged.update(right)
+                return merged
+            # Попытка спасти частичный ответ с помощью простого разбора пар id->перевод
+            salvage = self._salvage_translations_from_text(content)
+            if salvage:
+                return salvage
+            # Переводим по одному в крайнем случае
+            return self._translate_format2_items_individually(batch, source_lang, target_lang)
 
     def _translate_format2_items(
         self,
@@ -1645,7 +1665,7 @@ class ConstructionAIAgent:
 
         translations: Dict[str, str] = {}
         batch: List[Dict[str, Any]] = []
-        approx_limit = min(max(1000, context_tokens), FORMAT2_DEFAULT_CONTEXT_TOKENS)
+        approx_limit = min(max(1000, context_tokens), FORMAT2_TRANSLATION_BATCH_LIMIT)
         current_tokens = 0
 
         for item in items:
@@ -1668,6 +1688,84 @@ class ConstructionAIAgent:
             )
 
         return translations
+
+    def _salvage_translations_from_text(self, text: str) -> Dict[str, str]:
+        """Попробовать вытащить пары id->перевод даже из некорректного JSON."""
+        if not text:
+            return {}
+        cleaned = text.strip()
+        if cleaned.startswith("```"):
+            fence_end = cleaned.rfind("```")
+            if fence_end != -1:
+                cleaned = cleaned.split("\n", 1)[-1]
+                cleaned = cleaned[:fence_end].strip()
+        try:
+            parsed = json.loads(cleaned)
+            if isinstance(parsed, dict):
+                return parsed.get("translations") or parsed
+        except Exception:
+            pass
+
+        import re
+
+        salvage: Dict[str, str] = {}
+        # Ищем пары "123": "translation"
+        for match in re.finditer(r'"(\d+)"\s*:\s*"([^"]+)"', cleaned):
+            salvage[match.group(1)] = match.group(2)
+        # Ищем строки вида id=... translation=...
+        if not salvage:
+            for line in cleaned.splitlines():
+                if ":" in line:
+                    parts = line.split(":", 1)
+                    key = parts[0].strip().strip('"').strip()
+                    val = parts[1].strip().strip('"').strip()
+                    if key.isdigit() and val:
+                        salvage[key] = val
+        return salvage
+
+    def _translate_format2_items_individually(
+        self,
+        batch: List[Dict[str, Any]],
+        source_lang: str,
+        target_lang: str,
+    ) -> Dict[str, str]:
+        """Медленный, но надежный перевод по одному элементу."""
+        results: Dict[str, str] = {}
+        for item in batch:
+            text = item.get("description", "")
+            item_id = item.get("translation_id")
+            if not text or item_id is None:
+                continue
+            translated = self._translate_single_text(text, source_lang, target_lang)
+            if translated:
+                results[str(item_id)] = translated
+        return results
+
+    def _translate_single_text(self, text: str, source_lang: str, target_lang: str) -> Optional[str]:
+        """Перевести один фрагмент текста с минимальными требованиями к формату ответа."""
+        if not text or not self.openai_client:
+            return None
+
+        system_prompt = (
+            "Кратко переведи строительное описание без пояснений. "
+            f"С {source_lang} на {target_lang}. Верни только перевод."
+        )
+        try:
+            LLM_REQUESTS.inc()
+            completion = self.openai_client.chat.completions.create(
+                model=self.config.llm_model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": text},
+                ],
+                temperature=0.1,
+                max_tokens=256,
+                response_format={"type": "text"},
+            )
+            return completion.choices[0].message.content.strip()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Fallback single translation failed: %s", exc)
+            return None
 
     def _build_format2_rows(
         self,
