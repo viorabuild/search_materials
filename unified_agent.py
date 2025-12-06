@@ -1497,6 +1497,7 @@ class ConstructionAIAgent:
         mapping = self.estimate_importer._build_mapping(list(df.columns), column_map, df=df)
 
         items: List[Dict[str, Any]] = []
+        item_counter = 0
         for _, row in df.iterrows():
             desc_raw = row.get(mapping["description"])
             desc = str(desc_raw).strip() if desc_raw is not None else ""
@@ -1547,7 +1548,7 @@ class ConstructionAIAgent:
                 unit = ""
 
             items.append({
-                "translation_id": str(len(items)),
+                "translation_id": str(item_counter),
                 "code": code,
                 "number": number,
                 "description": desc,
@@ -1556,6 +1557,7 @@ class ConstructionAIAgent:
                 "unit_price": unit_price,
                 "is_section": is_section,
             })
+            item_counter += 1
 
         estimate: Optional[Estimate] = None
         try:
@@ -1592,7 +1594,8 @@ class ConstructionAIAgent:
             f"Переводи строго с {source_label} на {target_label}, максимально точно и без вольных интерпретаций. "
             "Сохраняй числа, валюты, единицы измерения и структуру списка. "
             "Если текст уже на целевом языке, верни его без изменений. "
-            "Верни JSON с объектом translations: {\"id\": \"перевод\"}."
+            "Верни JSON с объектом translations, где ключи это id из запроса, а значения это переводы. "
+            "Пример: {\"translations\": {\"0\": \"Перевод первого\", \"1\": \"Перевод второго\"}}."
         )
 
         payload = {
@@ -1633,7 +1636,9 @@ class ConstructionAIAgent:
             )
             content = completion.choices[0].message.content or "{}"
             parsed = json.loads(content)
+            logger.info("Format2 batch raw response: %s", str(parsed)[:500])
             normalized = self._normalize_translation_payload(parsed)
+            logger.info("Format2 batch normalized: %s", str(normalized)[:500])
             if not normalized:
                 salvage = self._salvage_translations_from_text(content)
                 if salvage:
@@ -1766,8 +1771,17 @@ class ConstructionAIAgent:
                 if key and isinstance(val, str) and val.strip():
                     return {key: val.strip()}
             if "translations" in payload and isinstance(payload["translations"], dict):
+                translations_dict = payload["translations"]
+                # Проверяем если это неправильный формат: {'id': '1', 'text': '...'}
+                if "id" in translations_dict and "text" in translations_dict:
+                    # Это неправильный формат, но мы можем извлечь перевод
+                    item_id = str(translations_dict["id"]).strip()
+                    translation = str(translations_dict["text"]).strip()
+                    if item_id and translation:
+                        return {item_id: translation}
+                # Правильный формат: {'0': '...', '1': '...'}
                 return {
-                    str(k): str(v) for k, v in payload["translations"].items() if isinstance(v, str)
+                    str(k): str(v) for k, v in translations_dict.items() if isinstance(v, str)
                 }
             # Уже мапа?
             if all(isinstance(k, (str, int)) and isinstance(v, str) for k, v in payload.items()):
@@ -1860,10 +1874,16 @@ class ConstructionAIAgent:
         ]
         rows: List[List[Any]] = [header]
         section_rows: List[int] = []
+        
+        logger.info("_build_format2_rows: items=%d, translations=%d, translation_keys=%s", 
+                    len(items), len(translations), list(translations.keys())[:5])
 
         for idx, item in enumerate(items, start=1):
             sheet_row = len(rows) + 1
-            translation = translations.get(item.get("translation_id", ""), "")
+            item_id = item.get("translation_id", "")
+            translation = translations.get(item_id, "")
+            if idx <= 3:  # Log first 3 items
+                logger.info("_build_format2_rows: item[%d] id=%s, translation=%s", idx, item_id, translation[:50] if translation else "")
 
             number_display = item.get("number") or str(idx)
             try:
