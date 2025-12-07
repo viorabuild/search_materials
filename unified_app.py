@@ -506,7 +506,7 @@ def import_estimate():
                 create_sheet=bool(data.get('create_sheet', True)),
                 create_new_spreadsheet=bool(data.get('create_new_spreadsheet', False)),
                 target_spreadsheet_id=data.get('target_spreadsheet_id') or google_sheet_id,
-                rewrite_source_sheet=bool(data.get('rewrite_source_sheet', False)),
+                rewrite_source_sheet=data.get('rewrite_source_sheet'),
                 format_version=format_version,
                 translate=translate,
                 translate_from=translate_from,

@@ -18,6 +18,7 @@ import importlib
 import json
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -1532,6 +1533,30 @@ class ConstructionAIAgent:
                     return False
                 return cleaned.isdigit()
 
+            def _is_roman_numeral(value: str) -> bool:
+                text = re.sub(r"[\s.)-]+$", "", str(value or "").strip().upper())
+                if not text:
+                    return False
+                if len(text) > 8:
+                    return False
+                return bool(re.fullmatch(r"M{0,4}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})", text))
+
+            def _roman_prefix_from_text(text: str) -> Optional[str]:
+                raw = str(text or "").strip()
+                if not raw:
+                    return None
+                match = re.match(r"^(?P<roman>[IVXLCDM]+)\s*[-–—.)]?\s+(?P<title>.+)$", raw, flags=re.IGNORECASE)
+                if not match:
+                    return None
+                roman = (match.group("roman") or "").strip().upper()
+                title = (match.group("title") or "").strip()
+                if not roman or not title or len(roman) > 8:
+                    return None
+                return roman
+
+            roman_prefix = _roman_prefix_from_text(desc)
+            is_roman_number = _is_roman_numeral(number)
+
             is_section = False
             if not unit.strip():
                 try:
@@ -1539,8 +1564,13 @@ class ConstructionAIAgent:
                         is_section = True
                     elif number and _looks_like_int(number):
                         is_section = True
+                    elif roman_prefix or is_roman_number:
+                        is_section = True
                 except Exception:
                     is_section = False
+
+            if is_section and not number and roman_prefix:
+                number = roman_prefix
 
             if is_section:
                 qty = 0.0
@@ -1929,12 +1959,12 @@ class ConstructionAIAgent:
     ) -> None:
         """Применить правила форматирования для Формат 2."""
         try:
+            base_text_format = {"fontFamily": "Calibri", "fontSize": 12}
             base_range = f"A1:H{rows_count}"
             sheets_ai.format_range(
                 base_range,
                 {
-                    "fontFamily": "Calibri",
-                    "fontSize": 12,
+                    **base_text_format,
                     "verticalAlignment": "MIDDLE",
                     "wrapStrategy": "WRAP",
                 },
@@ -1944,6 +1974,8 @@ class ConstructionAIAgent:
             sheets_ai.format_range(
                 "A1:H1",
                 {
+                    **base_text_format,
+                    "fontSize": 14,
                     "backgroundColor": FORMAT2_HEADER_COLOR,
                     "textColor": {"red": 1, "green": 1, "blue": 1},
                     "bold": True,
@@ -1992,6 +2024,7 @@ class ConstructionAIAgent:
                 sheets_ai.format_range(
                     f"A{row_idx}:H{row_idx}",
                     {
+                        **base_text_format,
                         "backgroundColor": FORMAT2_HEADER_COLOR,
                         "textColor": {"red": 1, "green": 1, "blue": 1},
                         "fontSize": 14,
@@ -3042,7 +3075,7 @@ class ConstructionAIAgent:
         create_sheet: bool = True,
         create_new_spreadsheet: bool = False,
         target_spreadsheet_id: Optional[str] = None,
-        rewrite_source_sheet: bool = False,
+        rewrite_source_sheet: Optional[bool] = None,
         format_version: int = 1,
         translate: Optional[bool] = None,
         translate_from: str = "pt",
@@ -3100,10 +3133,15 @@ class ConstructionAIAgent:
         if translate is None:
             translate = format_version == 2
 
+        target_same_as_source = (not target_spreadsheet_id) or (target_spreadsheet_id == source_sheet_id)
+
         # Формат 2 по умолчанию переписывает текущий лист, если явно не попросили новый
-        if format_version == 2 and not create_new_spreadsheet and not target_spreadsheet_id:
-            if not rewrite_source_sheet:
+        if format_version == 2 and not create_new_spreadsheet and target_same_as_source:
+            if rewrite_source_sheet is None:
                 rewrite_source_sheet = True
+
+        if rewrite_source_sheet is None:
+            rewrite_source_sheet = False
 
         if format_version == 2:
             return self._format_estimate_v2(
