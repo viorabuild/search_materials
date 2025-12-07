@@ -1408,6 +1408,17 @@ class ConstructionAIAgent:
             result = chr(65 + rem) + result
         return result
 
+    def _as_text_cell(self, value: Any) -> str:
+        """Вернуть значение как текст, защищая от автоконвертации в числа/даты."""
+        if value is None:
+            return ""
+        text = str(value)
+        if not text:
+            return ""
+        if text.startswith("'") or text.startswith("="):
+            return text
+        return f"'{text}"
+
     def _apply_borders_only(self, sheets_ai: GoogleSheetsAI, worksheet: gspread.Worksheet, values: List[List[Any]]) -> None:
         """Применить рамки только к непустым ячейкам (текст/числа), не трогая остальные."""
         if not sheets_ai:
@@ -1938,8 +1949,8 @@ class ConstructionAIAgent:
                 total_formula = ""
 
             rows.append([
-                item.get("code") or "",
-                number_display,
+                self._as_text_cell(item.get("code") or ""),
+                self._as_text_cell(number_display),
                 item.get("description") or "",
                 item.get("unit") or "",
                 qty_val,
@@ -2683,6 +2694,7 @@ class ConstructionAIAgent:
         """Создать лист «Формат 2» с переводом и разметкой."""
         headers = values[0] if values else []
         data_rows = values[1:] if len(values) > 1 else []
+        source_data_rows = len(data_rows)
         items, estimate = self._extract_format2_items(
             headers=headers,
             rows=data_rows,
@@ -2696,6 +2708,14 @@ class ConstructionAIAgent:
 
         if not items:
             raise ValueError("Не удалось найти строки для форматирования")
+
+        if rewrite_source_sheet and source_data_rows >= 20:
+            threshold = max(5, source_data_rows // 4)
+            if len(items) < threshold:
+                raise ValueError(
+                    f"Распознано подозрительно мало строк ({len(items)} из ~{source_data_rows}). "
+                    "Отменяю перезапись листа, проверьте mapping или укажите column_map."
+                )
 
         translations: Dict[str, str] = {}
         if translate:
@@ -2742,6 +2762,13 @@ class ConstructionAIAgent:
         elif target_spreadsheet_id:
             target_spreadsheet = client.open_by_key(target_spreadsheet_id)
 
+        original_values: Optional[List[List[Any]]] = None
+        if rewrite_source_sheet:
+            try:
+                original_values = worksheet.get_all_values()
+            except Exception:
+                original_values = None
+
         target_ai = self.sheets_ai
         if not target_ai or target_ai.spreadsheet.id != target_spreadsheet.id:
             target_ai = GoogleSheetsAI(
@@ -2754,19 +2781,29 @@ class ConstructionAIAgent:
             sheet_title = worksheet.title
         else:
             sheet_title = f"{worksheet.title} — Формат 2"
-        prepared = self._prepare_worksheet(
-            target_ai,
-            sheet_title,
-            max(len(rows) + 10, 60),
-            8,
-        )
-        prepared.update("A1", rows, value_input_option="USER_ENTERED")
+        prepared = None
         try:
-            prepared.freeze(rows=1)
-        except Exception:
-            pass
+            prepared = self._prepare_worksheet(
+                target_ai,
+                sheet_title,
+                max(len(rows) + 10, 60),
+                8,
+            )
+            prepared.update("A1", rows, value_input_option="USER_ENTERED")
+            try:
+                prepared.freeze(rows=1)
+            except Exception:
+                pass
 
-        self._apply_format2_formatting(target_ai, prepared, section_rows, len(rows))
+            self._apply_format2_formatting(target_ai, prepared, section_rows, len(rows))
+        except Exception:
+            if rewrite_source_sheet and original_values is not None:
+                try:
+                    worksheet.clear()
+                    worksheet.update("A1", original_values, value_input_option="USER_ENTERED")
+                except Exception:
+                    pass
+            raise
 
         logger.info(
             "Format2 writing rows: target='%s', worksheet='%s', rows=%d, sections=%d.",
@@ -3121,6 +3158,11 @@ class ConstructionAIAgent:
         if not values:
             raise ValueError("Лист пуст, нечего импортировать")
 
+        # Формат 2 всегда работает в исходной таблице, без создания новых
+        if format_version == 2:
+            create_new_spreadsheet = False
+            target_spreadsheet_id = source_sheet_id
+
         try:
             translation_context_tokens = int(translation_context_tokens or FORMAT2_DEFAULT_CONTEXT_TOKENS)
         except Exception:
@@ -3135,10 +3177,9 @@ class ConstructionAIAgent:
 
         target_same_as_source = (not target_spreadsheet_id) or (target_spreadsheet_id == source_sheet_id)
 
-        # Формат 2 по умолчанию переписывает текущий лист, если явно не попросили новый
+        # Формат 2 должен работать в исходном листе, если целевая таблица совпадает и не просили новую
         if format_version == 2 and not create_new_spreadsheet and target_same_as_source:
-            if rewrite_source_sheet is None:
-                rewrite_source_sheet = True
+            rewrite_source_sheet = True
 
         if rewrite_source_sheet is None:
             rewrite_source_sheet = False

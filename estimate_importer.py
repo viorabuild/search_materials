@@ -369,6 +369,8 @@ class ExcelEstimateImporter:
                     if match:
                         mapping[key] = match
 
+        used_columns = set(mapping.values())
+
         # Автоматический подбор для отсутствующих ключей
         for field, aliases in self.COLUMN_ALIASES.items():
             if field in mapping:
@@ -379,6 +381,7 @@ class ExcelEstimateImporter:
             )
             if match:
                 mapping[field] = match
+                used_columns.add(match)
 
         # Подсказка количества по данным (если не нашли по названию)
         if "quantity" not in mapping and df is not None:
@@ -447,21 +450,27 @@ class ExcelEstimateImporter:
                 mapping["number"] = candidates_num[0][2]
 
         if "description" not in mapping:
-            guessed = self._guess_description_column(columns, column_map, df=df)
+            guessed = self._guess_description_column(columns, column_map, df=df, used_columns=used_columns)
             if guessed:
                 mapping["description"] = guessed
             else:
                 # финальный fallback: первая доступная колонка
                 for col in columns:
-                    if col not in (column_map or {}).values():
+                    if col not in (column_map or {}).values() and col not in used_columns:
                         mapping["description"] = col
                         break
 
         return mapping
 
-    def _guess_description_column(self, columns: List[str], column_map: Optional[Dict[str, str]] = None, df=None) -> Optional[str]:
+    def _guess_description_column(
+        self,
+        columns: List[str],
+        column_map: Optional[Dict[str, str]] = None,
+        df=None,
+        used_columns: Optional[Iterable[str]] = None,
+    ) -> Optional[str]:
         """Эвристика: выбрать самую «текстовую» колонку, если описание не найдено по заголовку."""
-        excluded = set((column_map or {}).values())
+        excluded = set((column_map or {}).values()) | set(used_columns or [])
         # Без DataFrame или без данных выбираем первый не исключенный столбец
         if df is None or getattr(df, "empty", False):
             for col in columns:
