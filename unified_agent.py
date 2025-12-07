@@ -2690,11 +2690,20 @@ class ConstructionAIAgent:
         translate_to: str,
         translation_context_tokens: int,
         rewrite_source_sheet: bool,
+        disable_sparse_guard: bool = False,
     ) -> Dict[str, Any]:
         """Создать лист «Формат 2» с переводом и разметкой."""
         headers = values[0] if values else []
         data_rows = values[1:] if len(values) > 1 else []
-        source_data_rows = len(data_rows)
+
+        def _non_empty_row_count(rows: List[List[Any]]) -> int:
+            count = 0
+            for row in rows:
+                if any(str(cell).strip() for cell in row):
+                    count += 1
+            return count
+
+        source_data_rows = _non_empty_row_count(data_rows)
         items, estimate = self._extract_format2_items(
             headers=headers,
             rows=data_rows,
@@ -2709,8 +2718,8 @@ class ConstructionAIAgent:
         if not items:
             raise ValueError("Не удалось найти строки для форматирования")
 
-        if rewrite_source_sheet and source_data_rows >= 20:
-            threshold = max(5, source_data_rows // 4)
+        if rewrite_source_sheet and not disable_sparse_guard and source_data_rows >= 20:
+            threshold = max(5, source_data_rows // 2)
             if len(items) < threshold:
                 raise ValueError(
                     f"Распознано подозрительно мало строк ({len(items)} из ~{source_data_rows}). "
@@ -3113,6 +3122,7 @@ class ConstructionAIAgent:
         create_new_spreadsheet: bool = False,
         target_spreadsheet_id: Optional[str] = None,
         rewrite_source_sheet: Optional[bool] = None,
+        disable_sparse_guard: bool = False,
         format_version: int = 1,
         translate: Optional[bool] = None,
         translate_from: str = "pt",
@@ -3202,6 +3212,7 @@ class ConstructionAIAgent:
                 translate_to=translate_to,
                 translation_context_tokens=translation_context_tokens,
                 rewrite_source_sheet=rewrite_source_sheet,
+                disable_sparse_guard=disable_sparse_guard,
             )
 
         headers = values[0] if values else []
