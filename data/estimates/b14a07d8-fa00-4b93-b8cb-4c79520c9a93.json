@@ -1,0 +1,43 @@
+{
+  "metadata": {
+    "id": "b14a07d8-fa00-4b93-b8cb-4c79520c9a93",
+    "name": "Medições_Charneca (копия)",
+    "description": "",
+    "client_name": "",
+    "client_contact": "",
+    "project_address": "",
+    "created_at": 1765207368.3144572,
+    "updated_at": 1765207368.314782,
+    "status": "draft",
+    "currency": "€",
+    "discount_percent": 0.0,
+    "tax_percent": 0.0,
+    "notes": "",
+    "template_id": null
+  },
+  "items": [
+    {
+      "id": "a965efcb-5ae8-48e6-b3f9-b49b1756268e",
+      "name": "TOTAIS",
+      "description": "TOTAIS",
+      "item_type": "work",
+      "quantity": 0.0,
+      "unit": "шт",
+      "unit_price": 0.0,
+      "total_price": 0.0,
+      "code": "",
+      "supplier": "",
+      "supplier_url": "",
+      "notes": "",
+      "created_at": 1765207368.314393,
+      "updated_at": 1765207368.314393
+    }
+  ],
+  "summary": {
+    "subtotal": 0.0,
+    "discount": 0.0,
+    "tax": 0.0,
+    "total": 0.0,
+    "items_count": 1
+  }
+}

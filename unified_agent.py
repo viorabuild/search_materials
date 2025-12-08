@@ -1489,29 +1489,49 @@ class ConstructionAIAgent:
         except Exception:
             return False
 
-    def _extract_format2_items(
+    def _build_format2_items_from_df(
         self,
-        headers: List[Any],
-        rows: List[List[Any]],
-        column_map: Optional[Dict[str, str]],
-        *,
-        name: Optional[str],
-        description: str,
-        client_name: str,
-        currency: str,
+        df,
+        mapping: Dict[str, str],
         default_item_type: ItemType | str,
-    ) -> Tuple[List[Dict[str, Any]], Optional[Estimate]]:
-        """Подготовить строки для «Формат 2» и вернуть импортированную смету (если удалось)."""
-        if not self.estimate_importer:
-            raise RuntimeError("Estimate importer not available")
-
-        df = self.estimate_importer.dataframe_from_values(headers, rows)
-        mapping = self.estimate_importer._build_mapping(list(df.columns), column_map, df=df)
+    ) -> List[Dict[str, Any]]:
+        """Собрать элементы Формата 2 из готового DataFrame и заранее подобранного mapping."""
 
         items: List[Dict[str, Any]] = []
         item_counter = 0
+
+        def _looks_like_int(value: str) -> bool:
+            cleaned = value.replace(" ", "").replace("\u00a0", "")
+            if cleaned.endswith(".") or cleaned.endswith(","):
+                cleaned = cleaned[:-1]
+            if "." in cleaned or "," in cleaned or not cleaned:
+                return False
+            return cleaned.isdigit()
+
+        def _is_roman_numeral(value: str) -> bool:
+            text = re.sub(r"[\s.)-]+$", "", str(value or "").strip().upper())
+            if not text:
+                return False
+            if len(text) > 8:
+                return False
+            return bool(re.fullmatch(r"M{0,4}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})", text))
+
+        def _roman_prefix_from_text(text: str) -> Optional[str]:
+            raw = str(text or "").strip()
+            if not raw:
+                return None
+            match = re.match(r"^(?P<roman>[IVXLCDM]+)\s*[-–—.)]?\s+(?P<title>.+)$", raw, flags=re.IGNORECASE)
+            if not match:
+                return None
+            roman = (match.group("roman") or "").strip().upper()
+            title = (match.group("title") or "").strip()
+            if not roman or not title or len(roman) > 8:
+                return None
+            return roman
+
+        description_col = mapping.get("description")
         for _, row in df.iterrows():
-            desc_raw = row.get(mapping["description"])
+            desc_raw = row.get(description_col) if description_col else None
             desc = str(desc_raw).strip() if desc_raw is not None else ""
             if not desc:
                 continue
@@ -1535,35 +1555,6 @@ class ConstructionAIAgent:
 
             qty = self.estimate_importer._to_float(row.get(mapping.get("quantity", ""), 0.0))
             unit_price = self.estimate_importer._to_float(row.get(mapping.get("unit_price", ""), 0.0))
-
-            def _looks_like_int(value: str) -> bool:
-                cleaned = value.replace(" ", "").replace("\u00a0", "")
-                if cleaned.endswith(".") or cleaned.endswith(","):
-                    cleaned = cleaned[:-1]
-                if "." in cleaned or "," in cleaned or not cleaned:
-                    return False
-                return cleaned.isdigit()
-
-            def _is_roman_numeral(value: str) -> bool:
-                text = re.sub(r"[\s.)-]+$", "", str(value or "").strip().upper())
-                if not text:
-                    return False
-                if len(text) > 8:
-                    return False
-                return bool(re.fullmatch(r"M{0,4}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})", text))
-
-            def _roman_prefix_from_text(text: str) -> Optional[str]:
-                raw = str(text or "").strip()
-                if not raw:
-                    return None
-                match = re.match(r"^(?P<roman>[IVXLCDM]+)\s*[-–—.)]?\s+(?P<title>.+)$", raw, flags=re.IGNORECASE)
-                if not match:
-                    return None
-                roman = (match.group("roman") or "").strip().upper()
-                title = (match.group("title") or "").strip()
-                if not roman or not title or len(roman) > 8:
-                    return None
-                return roman
 
             roman_prefix = _roman_prefix_from_text(desc)
             is_roman_number = _is_roman_numeral(number)
@@ -1600,21 +1591,127 @@ class ConstructionAIAgent:
             })
             item_counter += 1
 
-        estimate: Optional[Estimate] = None
-        try:
-            estimate = self.estimate_importer.import_from_dataframe(
-                df=df,
-                column_map=column_map,
-                name=name or "Estimate Import",
-                description=description,
-                client_name=client_name,
-                currency=currency,
-                default_item_type=default_item_type,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Failed to build estimate object for format 2: %s", exc)
+        return items
 
-        return items, estimate
+    def _extract_format2_items(
+        self,
+        headers: List[Any],
+        rows: List[List[Any]],
+        column_map: Optional[Dict[str, str]],
+        *,
+        name: Optional[str],
+        description: str,
+        client_name: str,
+        currency: str,
+        default_item_type: ItemType | str,
+    ) -> Tuple[List[Dict[str, Any]], Any, Dict[str, str]]:
+        """Подготовить строки для «Формат 2» и вернуть вспомогательные данные."""
+        if not self.estimate_importer:
+            raise RuntimeError("Estimate importer not available")
+
+        df = self.estimate_importer.dataframe_from_values(headers, rows)
+        mapping = self.estimate_importer._build_mapping(list(df.columns), column_map, df=df)
+        items = self._build_format2_items_from_df(df, mapping, default_item_type)
+
+        return items, df, mapping
+
+    def _recover_sparse_format2_items(
+        self,
+        df,
+        mapping: Dict[str, str],
+        items: List[Dict[str, Any]],
+        default_item_type: ItemType | str,
+        column_map: Optional[Dict[str, str]],
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, str], Optional[str]]:
+        """Попробовать альтернативные сопоставления колонок, если нашли слишком мало строк."""
+
+        best_items = items
+        best_mapping = mapping
+        chosen_label: Optional[str] = None
+        candidates: List[Tuple[str, Dict[str, str], List[Dict[str, Any]]]] = []
+
+        # Вариант без пользовательского column_map — вдруг он неверный
+        if column_map:
+            auto_mapping = self.estimate_importer._build_mapping(list(df.columns), None, df=df)
+            auto_items = self._build_format2_items_from_df(df, auto_mapping, default_item_type)
+            candidates.append(("auto_mapping", auto_mapping, auto_items))
+
+        # Вариант с принудительным выбором самой «текстовой» колонки под описание
+        guessed_desc = self.estimate_importer._guess_description_column(
+            list(df.columns),
+            column_map=None,
+            df=df,
+            used_columns=set(mapping.values()) - {mapping.get("description")},
+        )
+        if guessed_desc and guessed_desc != mapping.get("description"):
+            guessed_mapping = dict(mapping)
+            guessed_mapping["description"] = guessed_desc
+            guessed_items = self._build_format2_items_from_df(df, guessed_mapping, default_item_type)
+            candidates.append(("textual_description", guessed_mapping, guessed_items))
+
+        # Brute-force: перебираем колонки с непустыми значениями как потенциальное описание
+        density: List[Tuple[int, int, str]] = []
+        for col in df.columns:
+            try:
+                non_empty = 0
+                text_like = 0
+                for val in df[col]:
+                    sval = str(val).strip()
+                    if not sval:
+                        continue
+                    non_empty += 1
+                    try:
+                        float(sval.replace(",", "."))
+                    except Exception:
+                        if len(sval) > 2:
+                            text_like += 1
+            except Exception:
+                non_empty = 0
+                text_like = 0
+            if non_empty:
+                density.append((text_like, non_empty, str(col)))
+        density.sort(reverse=True)
+
+        for text_like, _, col in density[:12]:  # ограничим число попыток, начиная с самых «плотных»
+            if text_like == 0:
+                continue
+            if col == mapping.get("description"):
+                continue
+            alt_mapping = dict(mapping)
+            alt_mapping["description"] = col
+            # Если колонка уже использовалась под числа/коды — убираем, чтобы не тянуть текст в qty/price
+            for key in ("quantity", "unit_price", "total_price", "number", "unit", "code"):
+                if alt_mapping.get(key) == col and key != "description":
+                    alt_mapping.pop(key, None)
+            alt_items = self._build_format2_items_from_df(df, alt_mapping, default_item_type)
+            candidates.append((f"desc_scan:{col}", alt_mapping, alt_items))
+
+        for label, cand_mapping, cand_items in candidates:
+            if len(cand_items) > len(best_items):
+                best_items = cand_items
+                best_mapping = cand_mapping
+                chosen_label = label
+
+        return best_items, best_mapping, chosen_label
+
+    def _count_non_empty_descriptions(self, df, description_col: Optional[str]) -> int:
+        """Подсчитать строки с непустым описанием в выбранной колонке."""
+        if not description_col or description_col not in df.columns:
+            return 0
+        try:
+            series = df[description_col]
+        except Exception:
+            return 0
+        count = 0
+        try:
+            for val in series:
+                if val is None:
+                    continue
+                if str(val).strip():
+                    count += 1
+        except Exception:
+            return 0
+        return count
 
     def _translate_format2_batch(
         self,
@@ -2704,7 +2801,7 @@ class ConstructionAIAgent:
             return count
 
         source_data_rows = _non_empty_row_count(data_rows)
-        items, estimate = self._extract_format2_items(
+        items, df, mapping = self._extract_format2_items(
             headers=headers,
             rows=data_rows,
             column_map=column_map,
@@ -2718,13 +2815,61 @@ class ConstructionAIAgent:
         if not items:
             raise ValueError("Не удалось найти строки для форматирования")
 
-        if rewrite_source_sheet and not disable_sparse_guard and source_data_rows >= 20:
-            threshold = max(5, source_data_rows // 2)
-            if len(items) < threshold:
-                raise ValueError(
-                    f"Распознано подозрительно мало строк ({len(items)} из ~{source_data_rows}). "
-                    "Отменяю перезапись листа, проверьте mapping или укажите column_map."
-                )
+        def _guard_row_count(current_items: List[Dict[str, Any]], current_mapping: Dict[str, str]) -> int:
+            """Рассчитать базу для порога защиты от разреженных данных."""
+            desc_rows = self._count_non_empty_descriptions(df, current_mapping.get("description"))
+            guard_rows = source_data_rows
+            if desc_rows:
+                # Фокусируемся на строках с описанием, чтобы не учитывать пустые или технические строки.
+                guard_rows = min(source_data_rows, max(desc_rows, len(current_items)))
+            return guard_rows
+
+        if rewrite_source_sheet and not disable_sparse_guard:
+            guard_rows = _guard_row_count(items, mapping)
+            if guard_rows >= 20:
+                threshold = max(5, guard_rows // 2)
+                if len(items) < threshold:
+                    recovered_items, recovered_mapping, chosen_label = self._recover_sparse_format2_items(
+                        df=df,
+                        mapping=mapping,
+                        items=items,
+                        default_item_type=default_item_type,
+                        column_map=column_map,
+                    )
+                    if chosen_label:
+                        logger.warning(
+                            "Format2: switching to %s due to sparse detection (items %d -> %d, rows≈%d, desc_rows≈%d).",
+                            chosen_label,
+                            len(items),
+                            len(recovered_items),
+                            source_data_rows,
+                            self._count_non_empty_descriptions(df, recovered_mapping.get("description")),
+                        )
+                        items = recovered_items
+                        mapping = recovered_mapping
+
+                    guard_rows = _guard_row_count(items, mapping)
+                    if guard_rows >= 20:
+                        threshold = max(5, guard_rows // 2)
+                        if len(items) < threshold:
+                            raise ValueError(
+                                f"Распознано подозрительно мало строк ({len(items)} из ~{guard_rows}). "
+                                "Отменяю перезапись листа, проверьте mapping или укажите column_map."
+                            )
+
+        estimate: Optional[Estimate] = None
+        try:
+            estimate = self.estimate_importer.import_from_dataframe(
+                df=df,
+                column_map=mapping,
+                name=name or "Estimate Import",
+                description=description,
+                client_name=client_name,
+                currency=currency,
+                default_item_type=default_item_type,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to build estimate object for format 2: %s", exc)
 
         translations: Dict[str, str] = {}
         if translate:
