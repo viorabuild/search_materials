@@ -67,6 +67,7 @@ from cache_manager import CacheManager
 from markdown_ai import GoogleSheetsAI
 from local_materials_db import LocalMaterialDatabase
 from materials_db_assistant import MaterialsDatabaseAssistant
+from dispatcher_chat_agent import DispatcherChatAgent
 from project_chat_agent import ProjectChatAgent, ProjectChatError
 
 try:
@@ -228,6 +229,11 @@ class ConstructionAIAgentConfig:
     project_chat_context_files: Optional[str] = None
     project_chat_system_prompt: Optional[str] = None
     project_chat_max_history_turns: int = 6
+    # Dispatcher chat
+    enable_dispatcher_chat: bool = True
+    dispatcher_model: str = "qwen/qwen3-vl-4b"
+    dispatcher_system_prompt: Optional[str] = None
+    dispatcher_history_turns: int = 8
     enable_estimate_constructor: bool = True
     estimate_storage_path: str = "./data/estimates"
     estimate_packages_dir: str = "./data/estimate_packages"
@@ -307,6 +313,10 @@ class ConstructionAIAgentConfig:
             project_chat_context_files=os.getenv("PROJECT_CHAT_CONTEXT_FILES"),
             project_chat_system_prompt=os.getenv("PROJECT_CHAT_SYSTEM_PROMPT"),
             project_chat_max_history_turns=int(os.getenv("PROJECT_CHAT_MAX_HISTORY_TURNS", "6")),
+            enable_dispatcher_chat=os.getenv("ENABLE_DISPATCHER_CHAT", "true").lower() == "true",
+            dispatcher_model=os.getenv("DISPATCHER_MODEL") or local_llm_model or "qwen/qwen3-vl-4b",
+            dispatcher_system_prompt=os.getenv("DISPATCHER_SYSTEM_PROMPT"),
+            dispatcher_history_turns=int(os.getenv("DISPATCHER_HISTORY_TURNS", "8")),
             enable_estimate_constructor=enable_estimate_constructor,
             estimate_storage_path=estimate_storage_path,
             estimate_packages_dir=estimate_packages_dir,
@@ -508,6 +518,30 @@ class ConstructionAIAgent:
         self.default_timeout_seconds = self.config.default_timeout_seconds
         self._batch_rate_lock = Lock()
         self._last_batch_request_ts = 0.0
+
+        self.dispatcher_chat_agent: Optional[DispatcherChatAgent] = None
+        if self.config.enable_dispatcher_chat:
+            try:
+                dispatcher_model = (
+                    self.config.dispatcher_model
+                    or self.config.local_llm_model
+                    or self.config.llm_model
+                )
+                self.dispatcher_chat_agent = DispatcherChatAgent(
+                    client=self.openai_client,
+                    preferred_model=dispatcher_model,
+                    fallback_model=self.config.llm_model,
+                    system_prompt=self.config.dispatcher_system_prompt,
+                    max_history_turns=self.config.dispatcher_history_turns,
+                    request_timeout=self.config.llm_request_timeout,
+                    temperature=max(0.1, min(self.config.temperature, 1.0)),
+                )
+                logger.info("Dispatcher chat agent initialized (model=%s)", dispatcher_model)
+            except Exception as exc:  # noqa: BLE001
+                self.dispatcher_chat_agent = None
+                logger.warning("Failed to initialize dispatcher chat agent: %s", exc)
+        else:
+            logger.info("Dispatcher chat agent is disabled")
         
         self.project_chat_agent: Optional[ProjectChatAgent] = None
         if self.config.enable_project_chat:
@@ -792,6 +826,35 @@ class ConstructionAIAgent:
 
         return [result for result in ordered_results if result is not None]
     
+    # ========================================================================
+    # ГЛАВНЫЙ РАСПРЕДЕЛИТЕЛЬ: Общий чат
+    # ========================================================================
+    def chat_with_dispatcher(
+        self,
+        message: str,
+        *,
+        reset_history: bool = False,
+    ) -> str:
+        """Побеседовать с главным распределителем."""
+        if not self.dispatcher_chat_agent:
+            raise RuntimeError("Dispatcher chat agent is not available")
+
+        if reset_history:
+            self.dispatcher_chat_agent.reset_history()
+            if not message or not message.strip():
+                return "История главного распределителя сброшена."
+
+        if not message or not message.strip():
+            raise ValueError("Message is required for dispatcher chat")
+
+        return self.dispatcher_chat_agent.chat(message, reset_history=False)
+
+    def get_dispatcher_history(self) -> List[Dict[str, str]]:
+        """Получить историю чата главного распределителя."""
+        if not self.dispatcher_chat_agent:
+            return []
+        return self.dispatcher_chat_agent.get_history()
+
     # ========================================================================
     # ПРОЕКТНЫЙ ЧАТ: Диалог об устройстве репозитория
     # ========================================================================
@@ -1419,10 +1482,86 @@ class ConstructionAIAgent:
             return text
         return f"'{text}"
 
+    def _auto_resize_sheet(
+        self,
+        sheets_ai: GoogleSheetsAI,
+        worksheet: gspread.Worksheet,
+        rows: int,
+        cols: int,
+    ) -> None:
+        """Автоматически подобрать ширину колонок и высоту строк под содержимое."""
+        if not sheets_ai:
+            return
+        sheet_id = getattr(worksheet, "id", None) or worksheet._properties.get("sheetId")
+        try:
+            sheet_id_int = int(sheet_id) if isinstance(sheet_id, str) and sheet_id.isdigit() else int(sheet_id)
+        except Exception:
+            sheet_id_int = None
+        if sheet_id_int is None:
+            return
+
+        requests: List[Dict[str, Any]] = []
+        if cols > 0:
+            requests.append({
+                "autoResizeDimensions": {
+                    "dimensions": {
+                        "sheetId": sheet_id_int,
+                        "dimension": "COLUMNS",
+                        "startIndex": 0,
+                        "endIndex": cols,
+                    }
+                }
+            })
+        if rows > 0:
+            requests.append({
+                "autoResizeDimensions": {
+                    "dimensions": {
+                        "sheetId": sheet_id_int,
+                        "dimension": "ROWS",
+                        "startIndex": 0,
+                        "endIndex": rows,
+                    }
+                }
+            })
+
+        if not requests:
+            return
+
+        try:
+            sheets_ai.spreadsheet.batch_update({"requests": requests})
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to auto-resize sheet '%s': %s", worksheet.title, exc)
+
+    def _apply_base_text_formatting(
+        self,
+        sheets_ai: GoogleSheetsAI,
+        worksheet: gspread.Worksheet,
+        rows: int,
+        cols: int,
+    ) -> None:
+        """Применить базовый шрифт Calibri 12 к прямоугольнику листа."""
+        if not sheets_ai or rows <= 0 or cols <= 0:
+            return
+
+        range_a1 = f"A1:{self._column_letter(cols)}{rows}"
+        try:
+            sheets_ai.format_range(
+                range_a1,
+                {"fontFamily": "Calibri", "fontSize": 12},
+                worksheet_name=worksheet.title,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to apply base font %s: %s", range_a1, exc)
+
     def _apply_borders_only(self, sheets_ai: GoogleSheetsAI, worksheet: gspread.Worksheet, values: List[List[Any]]) -> None:
         """Применить рамки только к непустым ячейкам (текст/числа), не трогая остальные."""
         if not sheets_ai:
             return
+        rows_count = len(values)
+        cols_count = max((len(row) for row in values), default=0) if values else 0
+        if rows_count and cols_count:
+            self._apply_base_text_formatting(sheets_ai, worksheet, rows_count, cols_count)
+            self._auto_resize_sheet(sheets_ai, worksheet, rows_count, cols_count)
         border_style = {"style": "SOLID", "color": {"red": 0, "green": 0, "blue": 0}}
         border_format = {
             "cell": {
@@ -2142,6 +2281,9 @@ class ConstructionAIAgent:
                     },
                     worksheet_name=worksheet.title,
                 )
+            rows_to_resize = max(rows_count, getattr(worksheet, "row_count", rows_count) or rows_count)
+            cols_to_resize = max(8, getattr(worksheet, "col_count", 8) or 8)
+            self._auto_resize_sheet(sheets_ai, worksheet, rows_to_resize, cols_to_resize)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to apply format 2 styling: %s", exc)
 
@@ -2203,6 +2345,10 @@ class ConstructionAIAgent:
         """Применить фирменное форматирование к листу сметы."""
         try:
             header_color = {"red": 0.043, "green": 0.188, "blue": 0.18}
+            rows_to_format = max(rows_len, getattr(worksheet, "row_count", rows_len) or rows_len)
+            cols_to_format = max(getattr(worksheet, "col_count", 6) or 0, 6)
+            self._apply_base_text_formatting(sheets_ai, worksheet, rows_to_format, cols_to_format)
+            self._auto_resize_sheet(sheets_ai, worksheet, rows_to_format, cols_to_format)
             sheets_ai.spreadsheet.batch_update({
                 "requests": [
                     {
@@ -2348,6 +2494,13 @@ class ConstructionAIAgent:
                 except Exception:
                     pass
             worksheet.update("A1", rows, value_input_option="USER_ENTERED")
+            rows_to_format = max(row_count, getattr(worksheet, "row_count", row_count) or row_count)
+            cols_to_format = max(
+                getattr(worksheet, "col_count", 0) or 0,
+                max((len(r) for r in rows), default=0),
+            )
+            self._apply_base_text_formatting(sheets_ai, worksheet, rows_to_format, cols_to_format)
+            self._auto_resize_sheet(sheets_ai, worksheet, rows_to_format, cols_to_format)
             first_item_row = 1
             last_item_row = len(rows)
             total_with_vat_row = len(rows)
@@ -2537,6 +2690,10 @@ class ConstructionAIAgent:
         worksheet.update("A1", rows, value_input_option="USER_ENTERED")
         try:
             header_color = {"red": 0.043, "green": 0.188, "blue": 0.18}
+            rows_to_format = getattr(worksheet, "row_count", len(rows)) or len(rows)
+            cols_to_format = getattr(worksheet, "col_count", len(rows[0]) if rows else 1) or (len(rows[0]) if rows else 1)
+            self._apply_base_text_formatting(sheets_ai, worksheet, rows_to_format, cols_to_format)
+            self._auto_resize_sheet(sheets_ai, worksheet, rows_to_format, cols_to_format)
             sheets_ai.format_range(
                 "A1:F2",
                 {"backgroundColor": header_color, "textColor": {"red": 1, "green": 1, "blue": 1}, "bold": True, "fontFamily": "Calibri"},
@@ -2562,6 +2719,10 @@ class ConstructionAIAgent:
         worksheet.update("A1", rows, value_input_option="USER_ENTERED")
         try:
             header_color = {"red": 0.043, "green": 0.188, "blue": 0.18}
+            rows_to_format = getattr(worksheet, "row_count", len(rows)) or len(rows)
+            cols_to_format = getattr(worksheet, "col_count", len(rows[0]) if rows else 1) or (len(rows[0]) if rows else 1)
+            self._apply_base_text_formatting(sheets_ai, worksheet, rows_to_format, cols_to_format)
+            self._auto_resize_sheet(sheets_ai, worksheet, rows_to_format, cols_to_format)
             sheets_ai.format_range(
                 "A1:F1",
                 {"backgroundColor": header_color, "textColor": {"red": 1, "green": 1, "blue": 1}, "bold": True, "fontFamily": "Calibri"},
@@ -4120,6 +4281,15 @@ class ConstructionAIAgent:
                 "sheets_enabled": self.sheets_ai is not None,
                 "advanced_search_enabled": self.advanced_agent is not None,
                 "local_llm_enabled": self.config.enable_local_llm,
+            },
+            "dispatcher": {
+                "enabled": self.dispatcher_chat_agent is not None,
+                "model": self.config.dispatcher_model or self.config.local_llm_model or "",
+                "history_length": (
+                    len(self.dispatcher_chat_agent.get_history())
+                    if self.dispatcher_chat_agent
+                    else 0
+                ),
             },
             "sheet": sheet_stats,
             "materials_db": {

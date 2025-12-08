@@ -1516,6 +1516,112 @@
                     <p class="text-lg font-medium">Обработка запроса...</p>
                 </div>
             </div>
+
+            <!-- Главный распределитель: кнопка и панель -->
+            <button
+                @click="toggleDispatcherPanel"
+                class="fixed bottom-6 right-6 z-30 bg-purple-700 text-white px-4 py-3 rounded-full shadow-lg hover:bg-purple-800 transition-colors flex items-center gap-2"
+            >
+                <i class="fas fa-headset"></i>
+                <span class="hidden sm:inline">Главный распределитель</span>
+            </button>
+
+            <div
+                v-if="dispatcherPanelOpen"
+                class="fixed inset-0 z-40 flex justify-end"
+            >
+                <div class="flex-1 bg-black bg-opacity-30" @click="dispatcherPanelOpen = false"></div>
+                <div class="w-full sm:max-w-sm md:max-w-md lg:max-w-lg h-full bg-white border-l border-gray-200 shadow-2xl flex flex-col">
+                    <div class="p-4 border-b border-gray-200 flex items-start justify-between gap-3">
+                        <div>
+                            <p class="text-xs uppercase tracking-wide text-gray-500">Общий ИИ</p>
+                            <p class="text-lg font-bold text-gray-800">Главный распределитель</p>
+                            <p class="text-xs text-gray-500">
+                                Модель: {{ (stats && stats.dispatcher && stats.dispatcher.model) || 'qwen/qwen3-vl-4b' }}
+                            </p>
+                        </div>
+                        <button
+                            @click="dispatcherPanelOpen = false"
+                            class="text-gray-500 hover:text-gray-800"
+                            aria-label="Закрыть чат"
+                        >
+                            <i class="fas fa-times text-lg"></i>
+                        </button>
+                    </div>
+                    <div ref="dispatcherScroll" class="flex-1 overflow-y-auto p-4 space-y-3 bg-gray-50">
+                        <div
+                            v-if="!dispatcherMessages.length"
+                            class="h-full flex flex-col items-center justify-center text-center text-gray-500 space-y-3"
+                        >
+                            <i class="fas fa-compass text-3xl text-gray-400"></i>
+                            <p>Попросите распределителя выбрать инструмент или дать быстрый план.</p>
+                            <ul class="text-sm space-y-1">
+                                <li>• Сформулируй план поиска цен и импорта в Sheets</li>
+                                <li>• Как лучше проверить смету на дубликаты?</li>
+                                <li>• Что умеет режим Формат 2?</li>
+                            </ul>
+                        </div>
+                        <div
+                            v-for="message in dispatcherMessages"
+                            :key="message.id"
+                            class="flex"
+                            :class="message.role === 'user' ? 'justify-end' : 'justify-start'"
+                        >
+                            <div
+                                class="max-w-full sm:max-w-md rounded-lg px-4 py-3 shadow-sm border"
+                                :class="{
+                                    'bg-purple-700 text-white border-purple-700': message.role === 'user',
+                                    'bg-white text-gray-900 border-gray-200': message.role === 'assistant',
+                                    'bg-yellow-50 text-gray-900 border-yellow-200': message.role === 'system'
+                                }"
+                            >
+                                <div class="text-xs font-semibold opacity-80 mb-1 flex items-center justify-between gap-3">
+                                    <span>{{ labelDispatcherRole(message.role) }}</span>
+                                    <span>{{ formatTimestamp(message.timestamp) }}</span>
+                                </div>
+                                <p class="whitespace-pre-line break-words">{{ message.content }}</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="p-4 border-t border-gray-200 bg-white space-y-2">
+                        <textarea
+                            v-model="dispatcherInput"
+                            @keydown="handleDispatcherKeydown"
+                            class="w-full border border-gray-300 rounded-lg p-3 focus:ring-2 focus:ring-purple-600 focus:border-transparent"
+                            rows="3"
+                            placeholder="Сформируй маршрут: найти цены, сверить в Sheets, показать отчёт..."
+                        ></textarea>
+                        <div class="flex items-center gap-2 flex-wrap">
+                            <button
+                                @click="sendDispatcherMessage"
+                                :disabled="dispatcherLoading || !dispatcherInput.trim()"
+                                class="bg-purple-700 text-white px-4 py-2 rounded-lg hover:bg-purple-800 disabled:bg-gray-400 transition-colors"
+                            >
+                                <i class="fas fa-paper-plane mr-2"></i>
+                                Отправить
+                            </button>
+                            <button
+                                @click="resetDispatcherChat"
+                                :disabled="dispatcherLoading"
+                                class="px-4 py-2 rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-100 transition-colors"
+                            >
+                                <i class="fas fa-undo mr-2"></i>
+                                Сбросить
+                            </button>
+                            <div v-if="dispatcherLoading" class="text-sm text-gray-500 flex items-center gap-2">
+                                <i class="fas fa-spinner loading"></i>
+                                Думаем...
+                            </div>
+                        </div>
+                        <div v-if="dispatcherAlert" class="text-xs text-red-600">
+                            {{ dispatcherAlert }}
+                        </div>
+                        <p class="text-xs text-gray-500">
+                            Распределитель помогает выбрать режимы и шаги. Если нужен контекст (файл, ссылка на таблицу), укажите его прямо в сообщении.
+                        </p>
+                    </div>
+                </div>
+            </div>
         </main>
 
         <!-- Footer -->
@@ -1557,6 +1663,13 @@
                     projectChatExtraContext: '',
                     projectChatLoading: false,
                     projectChatHistoryKey: 'construction-ai-project-chat',
+                    dispatcherPanelOpen: false,
+                    dispatcherMessages: [],
+                    dispatcherInput: '',
+                    dispatcherLoading: false,
+                    dispatcherHistoryKey: 'construction-ai-dispatcher-chat',
+                    dispatcherAlert: null,
+                    dispatcherInitialized: false,
                     materialSearch: {
                         name: '',
                         useCache: true,
@@ -1788,6 +1901,12 @@
                     if (role === 'system') return 'Система';
                     return 'Сообщение';
                 },
+                labelDispatcherRole(role) {
+                    if (role === 'user') return 'Вы';
+                    if (role === 'assistant') return 'Распределитель';
+                    if (role === 'system') return 'Система';
+                    return 'Сообщение';
+                },
                 handleProjectChatKeydown(event) {
                     if (event.key !== 'Enter' || event.shiftKey) {
                         return;
@@ -1936,6 +2055,178 @@
                     const container = this.$refs.projectChatScroll;
                     if (container) {
                         container.scrollTop = container.scrollHeight;
+                    }
+                },
+                toggleDispatcherPanel() {
+                    this.dispatcherPanelOpen = !this.dispatcherPanelOpen;
+                    if (this.dispatcherPanelOpen) {
+                        this.ensureDispatcherHistory();
+                        this.$nextTick(() => this.scrollDispatcherToBottom());
+                    }
+                },
+                ensureDispatcherHistory() {
+                    if (!this.dispatcherInitialized) {
+                        this.loadDispatcherHistory();
+                    } else {
+                        this.$nextTick(() => this.scrollDispatcherToBottom());
+                    }
+                },
+                normalizeDispatcherHistory(history) {
+                    const base = Date.now();
+                    return (history || []).map((item, index) => ({
+                        id: item.id || `dispatcher-${base + index}`,
+                        role: item.role || 'assistant',
+                        content: item.content || '',
+                        timestamp: item.timestamp || new Date(base + index).toISOString(),
+                    }));
+                },
+                async loadDispatcherHistory() {
+                    try {
+                        const response = await fetch('/api/dispatcher/chat');
+                        const data = await response.json();
+                        if (data.success && Array.isArray(data.history)) {
+                            this.dispatcherMessages = this.normalizeDispatcherHistory(data.history);
+                            this.dispatcherInitialized = true;
+                            this.saveDispatcherHistory();
+                            this.$nextTick(() => this.scrollDispatcherToBottom());
+                            return;
+                        } else if (!data.success) {
+                            this.dispatcherAlert = `Ошибка: ${data.error}`;
+                        }
+                    } catch (error) {
+                        this.dispatcherAlert = `Ошибка: ${error.message}`;
+                    }
+                    this.loadDispatcherHistoryFromStorage();
+                },
+                loadDispatcherHistoryFromStorage() {
+                    try {
+                        const raw = localStorage.getItem(this.dispatcherHistoryKey);
+                        if (!raw) {
+                            return;
+                        }
+                        const parsed = JSON.parse(raw);
+                        if (Array.isArray(parsed)) {
+                            this.dispatcherMessages = parsed;
+                            this.dispatcherInitialized = true;
+                        }
+                    } catch (error) {
+                        console.warn('Не удалось загрузить историю распределителя', error);
+                    }
+                },
+                saveDispatcherHistory() {
+                    try {
+                        localStorage.setItem(
+                            this.dispatcherHistoryKey,
+                            JSON.stringify(this.dispatcherMessages),
+                        );
+                    } catch (error) {
+                        console.warn('Не удалось сохранить историю распределителя', error);
+                    }
+                },
+                scrollDispatcherToBottom() {
+                    const container = this.$refs.dispatcherScroll;
+                    if (container) {
+                        container.scrollTop = container.scrollHeight;
+                    }
+                },
+                handleDispatcherKeydown(event) {
+                    if (event.key !== 'Enter' || event.shiftKey) {
+                        return;
+                    }
+                    const text = this.dispatcherInput.trim();
+                    if (!text || this.dispatcherLoading) {
+                        event.preventDefault();
+                        return;
+                    }
+                    event.preventDefault();
+                    this.sendDispatcherMessage();
+                },
+                async sendDispatcherMessage() {
+                    const text = this.dispatcherInput.trim();
+                    if (!text || this.dispatcherLoading) {
+                        return;
+                    }
+                    this.dispatcherAlert = null;
+                    const userMessage = {
+                        id: `${Date.now()}-dispatcher-user`,
+                        role: 'user',
+                        content: text,
+                        timestamp: new Date().toISOString(),
+                    };
+                    this.dispatcherMessages.push(userMessage);
+                    this.dispatcherInput = '';
+                    this.dispatcherLoading = true;
+                    this.saveDispatcherHistory();
+                    this.$nextTick(() => this.scrollDispatcherToBottom());
+                    try {
+                        const response = await fetch('/api/dispatcher/chat', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ message: text }),
+                        });
+                        const data = await response.json();
+                        if (data.success) {
+                            if (Array.isArray(data.history)) {
+                                this.dispatcherMessages = this.normalizeDispatcherHistory(data.history);
+                            } else {
+                                this.dispatcherMessages.push({
+                                    id: `${Date.now()}-dispatcher-assistant`,
+                                    role: 'assistant',
+                                    content: data.reply,
+                                    timestamp: data.timestamp || new Date().toISOString(),
+                                });
+                            }
+                            this.dispatcherInitialized = true;
+                            this.saveDispatcherHistory();
+                        } else {
+                            const message = data.error ? `Ошибка: ${data.error}` : 'Не удалось получить ответ';
+                            this.dispatcherAlert = message;
+                        }
+                    } catch (error) {
+                        this.dispatcherAlert = `Ошибка: ${error.message}`;
+                    } finally {
+                        this.dispatcherLoading = false;
+                        this.$nextTick(() => this.scrollDispatcherToBottom());
+                    }
+                },
+                async resetDispatcherChat() {
+                    if (this.dispatcherLoading) {
+                        return;
+                    }
+                    this.dispatcherLoading = true;
+                    this.dispatcherAlert = null;
+                    try {
+                        const response = await fetch('/api/dispatcher/chat', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ reset: true }),
+                        });
+                        const data = await response.json();
+                        if (data.success) {
+                            if (Array.isArray(data.history)) {
+                                this.dispatcherMessages = this.normalizeDispatcherHistory(data.history);
+                            } else {
+                                this.dispatcherMessages = [];
+                                if (data.reply) {
+                                    this.dispatcherMessages.push({
+                                        id: `${Date.now()}-dispatcher-reset`,
+                                        role: 'system',
+                                        content: data.reply,
+                                        timestamp: data.timestamp || new Date().toISOString(),
+                                    });
+                                }
+                            }
+                            this.dispatcherInitialized = true;
+                            this.saveDispatcherHistory();
+                        } else {
+                            const message = data.error ? `Ошибка: ${data.error}` : 'Не удалось сбросить диалог';
+                            this.dispatcherAlert = message;
+                        }
+                    } catch (error) {
+                        this.dispatcherAlert = `Ошибка: ${error.message}`;
+                    } finally {
+                        this.dispatcherLoading = false;
+                        this.$nextTick(() => this.scrollDispatcherToBottom());
                     }
                 },
                 enrichSheetsHistory(history) {
@@ -2567,6 +2858,7 @@
             mounted() {
                 this.loadHistoryFromStorage();
                 this.loadProjectChatHistory();
+                this.loadDispatcherHistoryFromStorage();
                 this.$nextTick(() => this.scrollProjectChatToBottom());
                 this.loadStats();
             },

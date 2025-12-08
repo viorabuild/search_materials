@@ -215,6 +215,44 @@ def project_chat():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/dispatcher/chat', methods=['GET', 'POST'])
+def dispatcher_chat():
+    """Общий чат с главным распределителем."""
+    if not agent:
+        return jsonify({'error': 'Agent not initialized'}), 500
+
+    try:
+        if request.method == 'GET':
+            history = agent.get_dispatcher_history()
+            return jsonify({
+                'success': True,
+                'history': history,
+                'timestamp': datetime.now().isoformat(),
+            })
+
+        data = request.get_json() or {}
+        message_raw = data.get('message', '')
+        message = message_raw.strip() if isinstance(message_raw, str) else ''
+        reset = bool(data.get('reset', False))
+
+        if not message and not reset:
+            return jsonify({'error': 'message is required'}), 400
+
+        reply = agent.chat_with_dispatcher(message, reset_history=reset)
+        history = agent.get_dispatcher_history()
+
+        return jsonify({
+            'success': True,
+            'reply': reply,
+            'history': history,
+            'reset': reset,
+            'timestamp': datetime.now().isoformat(),
+        })
+    except Exception as e:  # noqa: BLE001
+        logger.error("Error in dispatcher chat: %s", e)
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/materials/batch', methods=['POST'])
 def search_materials_batch():
     """
